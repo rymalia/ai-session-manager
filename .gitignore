@@ -1,0 +1,9 @@
+node_modules/
+dist/
+*.log
+.DS_Store
+
+# Local agent/editor state
+.claude/
+.vscode/
+.idea/

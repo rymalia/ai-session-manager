@@ -1,0 +1,39 @@
+/* Sort control + per-card Open button. Classes prefixed `srt-`. */
+
+.srt-select {
+  /* Match the existing .controls select look; harmless if overridden. */
+  font: inherit;
+  color: inherit;
+  background: var(--input-bg, #161b22);
+  border: 1px solid var(--border, #30363d);
+  border-radius: 6px;
+  padding: 6px 8px;
+  cursor: pointer;
+}
+
+.srt-open-btn {
+  font: inherit;
+  font-size: 0.82em;
+  color: var(--muted, #8b949e);
+  background: transparent;
+  border: 1px solid var(--border, #30363d);
+  border-radius: 6px;
+  padding: 4px 10px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.srt-open-btn:hover {
+  color: var(--fg, #c9d1d9);
+  border-color: var(--accent, #4d9fff);
+}
+
+.srt-open-btn.ok {
+  color: #2dd4bf;
+  border-color: #2dd4bf;
+}
+
+.srt-open-btn.err {
+  color: #f85149;
+  border-color: #f85149;
+}

@@ -1,0 +1,36 @@
+{
+  "name": "claude-conversations-viewer",
+  "private": true,
+  "version": "1.0.0",
+  "description": "Local viewer for your AI coding CLI conversations — Claude Code, Codex, Grok, opencode, Cursor, Gemini CLI, Copilot CLI, Goose, and Droid in one searchable list. Nothing leaves your machine.",
+  "license": "MIT",
+  "author": "Daniel Farina",
+  "type": "module",
+  "engines": {
+    "node": ">=24"
+  },
+  "keywords": [
+    "claude-code",
+    "codex",
+    "ai-coding",
+    "cli",
+    "conversations",
+    "transcripts",
+    "viewer",
+    "local-first"
+  ],
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "test": "node scripts/smoke-test.mjs"
+  },
+  "dependencies": {
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^4.3.4",
+    "vite": "^5.4.11"
+  }
+}
