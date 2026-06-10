@@ -456,7 +456,7 @@ export default function App() {
     <div className="app">
       <header className="topbar">
         <div className="title-row">
-          <h1>AI Coding Conversations</h1>
+          <h1>AI Session Manager</h1>
           <span className="count">
             {convos ? `${filtered.length} / ${convos.length}` : '…'}
             {searching && <span className="searching"> · searching content…</span>}

@@ -1,7 +1,7 @@
 {
-  "name": "AI Coding Conversations",
-  "short_name": "Conversations",
-  "description": "Browse and search your local AI coding CLI conversations (Claude Code, Codex, Grok, opencode) in one place.",
+  "name": "AI Session Manager",
+  "short_name": "Sessions",
+  "description": "Browse, search, and resume your local AI coding CLI sessions (Claude Code, Codex, Grok, opencode, Cursor, and more) in one place.",
   "start_url": "/",
   "scope": "/",
   "display": "standalone",
