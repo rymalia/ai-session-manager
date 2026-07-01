@@ -45,3 +45,18 @@ export async function getConversation(sourceName, ref, lastN = 30) {
   if (!a) throw new Error('unknown source');
   return a.detail(ref, lastN);
 }
+
+// ---- markdown export (full-fidelity /replay parity) -------------------------
+// Export-capable adapters additionally export collectEvents(ref, opts). Adapters
+// without it are simply not export-capable (the UI hides the button for them).
+const EXPORTERS = Object.fromEntries(
+  Object.entries(ADAPTERS).filter(([, a]) => typeof a.collectEvents === 'function')
+);
+
+export function exportCapableSources() { return Object.keys(EXPORTERS); }
+
+export async function collectEvents(sourceName, ref, opts) {
+  const a = EXPORTERS[sourceName];
+  if (!a) { const e = new Error('export not supported for ' + sourceName); e.code = 'unsupported'; throw e; }
+  return a.collectEvents(ref, opts); // adapter validates ref (isInside) itself
+}

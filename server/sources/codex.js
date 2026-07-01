@@ -154,3 +154,127 @@ export async function detail(ref, lastN = 30) {
     messages: messages || [],
   };
 }
+
+// ---------------------------------------------------------------------------
+// Full-fidelity export: convert a Codex rollout into the shared normalized-event
+// contract the renderer (server/export.js) consumes. Direct port of
+// extract-session.py's load_codex_events + _codex_tool_input + _codex_output_text
+// (session-tools v1.7.0). Conversion is flag-independent — EVERYTHING is emitted;
+// the renderer filters. This reproduces `/replay <id> --full` byte-for-byte.
+// ---------------------------------------------------------------------------
+
+// Normalize a Codex tool-call payload into a Claude-style `input` object so
+// summarizeToolUse() renders a one-liner (mirrors _codex_tool_input).
+function codexToolInput(payload) {
+  if (payload.type === 'function_call') {
+    const raw = payload.arguments;
+    if (typeof raw === 'string') {
+      try {
+        const parsed = JSON.parse(raw);
+        return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : { arguments: raw };
+      } catch { return { arguments: raw }; }
+    }
+    return raw && typeof raw === 'object' && !Array.isArray(raw) ? raw : {};
+  }
+  // custom_tool_call: `input` is usually a raw string (often a code snippet).
+  const inp = payload.input;
+  if (inp && typeof inp === 'object' && !Array.isArray(inp)) return inp;
+  return { input: typeof inp === 'string' ? inp : '' };
+}
+
+// Flatten a Codex tool-call output (string | list of {type,text}) to text.
+function codexOutputText(output) {
+  if (typeof output === 'string') return output;
+  if (Array.isArray(output)) {
+    const parts = [];
+    for (const item of output) {
+      if (item && typeof item === 'object') parts.push(item.text || '');
+      else if (typeof item === 'string') parts.push(item);
+    }
+    return parts.filter(Boolean).join('\n');
+  }
+  return '';
+}
+
+// `opts` accepted for registry-signature parity but intentionally unused — like
+// load_codex_events(), conversion keeps every event; filtering is render-time.
+export async function collectEvents(ref, _opts = {}) {
+  const resolved = path.resolve(ref);
+  if (!isInside(resolved, ROOT)) throw new Error('forbidden');
+
+  const rl = readline.createInterface({
+    input: fs.createReadStream(resolved, { encoding: 'utf-8' }),
+    crlfDelay: Infinity,
+  });
+
+  const events = [];
+  const meta = {
+    source, isCodex: true, mainPath: resolved,
+    sessionId: null, cwd: null, model: null, cliVersion: null,
+    historyOn: false, // no ~/.claude/history.jsonl equivalent for Codex
+  };
+  const emit = (role, ts, blocks) =>
+    events.push({ role, ts: ts || '', source: 'main', sidechain: false, meta: false, blocks });
+
+  for await (const line of rl) {
+    const t = line.trim();
+    if (!t) continue;
+    let o; try { o = JSON.parse(t); } catch { continue; }
+    const ts = o.timestamp || '';
+    const etype = o.type;
+    const p = o.payload;
+    if (!p || typeof p !== 'object') continue;
+
+    if (etype === 'session_meta') {
+      if (meta.sessionId == null) meta.sessionId = p.session_id || p.id || null;
+      if (meta.cwd == null) meta.cwd = p.cwd || null;
+      if (meta.model == null) meta.model = p.model || p.model_provider || null;
+      if (meta.cliVersion == null) meta.cliVersion = p.cli_version || null;
+      continue;
+    }
+
+    if (etype === 'event_msg') {
+      // The clean, user-typed prompt. Other event_msg subtypes duplicate
+      // response_items or are bookkeeping — skip.
+      if (p.type === 'user_message') {
+        let text = p.message || '';
+        const imgs = p.images || p.local_images || [];
+        if (imgs.length) {
+          const note = `[${imgs.length} image(s) attached]`;
+          text = text.trim() ? `${text}\n\n${note}` : note;
+        }
+        if (text.trim()) emit('user', ts, [{ kind: 'text', text }]);
+      }
+      continue;
+    }
+
+    if (etype === 'response_item') {
+      const pt = p.type;
+      if (pt === 'message') {
+        if (p.role !== 'assistant') continue; // user/developer = injected context / system
+        const text = (Array.isArray(p.content) ? p.content : [])
+          .filter((b) => b && typeof b === 'object')
+          .map((b) => b.text || '').join('');
+        if (text.trim()) emit('assistant', ts, [{ kind: 'text', text }]);
+      } else if (pt === 'function_call' || pt === 'custom_tool_call') {
+        emit('assistant', ts, [{ kind: 'tool_use', name: p.name || '?', input: codexToolInput(p) }]);
+      } else if (pt === 'function_call_output' || pt === 'custom_tool_call_output') {
+        const text = codexOutputText(p.output);
+        if (text.trim()) emit('user', ts, [{ kind: 'tool_result', text }]);
+      } else if (pt === 'reasoning') {
+        const summary = Array.isArray(p.summary) ? p.summary : [];
+        const text = summary.filter((s) => s && typeof s === 'object')
+          .map((s) => s.text || '').join('\n').trim();
+        emit('assistant', ts, [{ kind: 'reasoning', text }]); // '' → renderer prints "[encrypted by Codex]"
+      }
+      continue;
+    }
+    // turn_context / compacted / token_count / task_* : bookkeeping — dropped.
+  }
+
+  if (!meta.sessionId) meta.sessionId = path.basename(resolved).replace(/\.jsonl$/, '');
+  // extract-session.py sorts all events by ISO timestamp; Array.sort is stable
+  // (Node 12+) so equal-ts events keep emission order, matching Python.
+  events.sort((a, b) => (a.ts < b.ts ? -1 : a.ts > b.ts ? 1 : 0));
+  return { meta, events };
+}
