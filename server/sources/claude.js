@@ -132,3 +132,115 @@ export async function detail(ref, lastN = 30) {
     messages: messages || [],
   };
 }
+
+// ---------------------------------------------------------------------------
+// Full-fidelity export: convert a Claude main transcript into the shared
+// normalized-event contract the renderer (server/export.js) consumes. Direct
+// port of extract-session.py's main-transcript path (load_jsonl_events +
+// extract_user_tool_results + extract_assistant_blocks feeding render_event).
+// Conversion is flag-independent — EVERYTHING is emitted; the renderer filters.
+// This reproduces `/replay <id> --full` byte-for-byte.
+//
+// Scope: 1A — the top-level `<id>.jsonl` main transcript ONLY. No subagents /
+// history.jsonl / folder-only / sessions-index.json recovery (that is Phase 1B,
+// ADR-0012, which also needs list() + a stable ref format). An audit found 0 of
+// 8420 live transcripts have an index entry, so 1A never triggers the index
+// header-enrichment lines — a naive collectEvents byte-matches /replay.
+// ---------------------------------------------------------------------------
+
+// Extract tool_result text from a user message's content list, mirroring
+// extract_user_tool_results: string content → one entry; list content → each
+// {type:'text'} item's text.
+function userToolResults(message) {
+  const content = message && message.content;
+  const out = [];
+  if (!Array.isArray(content)) return out;
+  for (const part of content) {
+    if (!part || typeof part !== 'object' || part.type !== 'tool_result') continue;
+    const c = part.content;
+    if (typeof c === 'string') out.push(c);
+    else if (Array.isArray(c)) {
+      for (const item of c) {
+        if (item && typeof item === 'object' && item.type === 'text') out.push(item.text || '');
+      }
+    }
+  }
+  return out;
+}
+
+// `opts` accepted for registry-signature parity but intentionally unused — like
+// the Codex adapter, conversion keeps every event; filtering is render-time.
+// history.jsonl backfill (the one collect-time flag) is Phase 1B, not here.
+export async function collectEvents(ref, _opts = {}) {
+  const resolved = path.resolve(ref);
+  if (!isInside(resolved, ROOT)) throw new Error('forbidden');
+
+  const rl = readline.createInterface({
+    input: fs.createReadStream(resolved, { encoding: 'utf-8' }),
+    crlfDelay: Infinity,
+  });
+
+  const events = [];
+  const cwdCandidates = []; // { ts, cwd } across ALL records — mirrors main()'s post-sort cwd scan
+  const meta = {
+    source, isCodex: false, mainPath: resolved,
+    sessionId: path.basename(resolved).replace(/\.jsonl$/, ''),
+    cwd: null, historyOn: false,
+  };
+  const emit = (role, ts, blocks, extra = {}) =>
+    events.push({ role, ts: ts || '', source: 'main', ...extra, blocks });
+
+  for await (const line of rl) {
+    const t = line.trim();
+    if (!t) continue;
+    let o; try { o = JSON.parse(t); } catch { continue; }
+    const ts = o.timestamp || '';
+    if (o.cwd) cwdCandidates.push({ ts, cwd: o.cwd });
+
+    const msg = o.message;
+    if (o.type === 'user' && msg) {
+      const content = msg.content;
+      const sidechain = !!o.isSidechain;
+      const meta_ = !!o.isMeta;
+      const blocks = [];
+      if (typeof content === 'string') {
+        blocks.push({ kind: 'text', text: content });
+      } else if (Array.isArray(content)) {
+        for (const b of content) {
+          if (!b || typeof b !== 'object') continue;
+          if (b.type === 'text') blocks.push({ kind: 'text', text: b.text || '' });
+          else if (b.type === 'image') {
+            const src = b.source || {};
+            blocks.push({ kind: 'image', mediaType: src.media_type || 'image', source: src });
+          }
+        }
+        for (const tr of userToolResults(msg)) blocks.push({ kind: 'tool_result', text: tr });
+      }
+      emit('user', ts, blocks, {
+        sidechain, meta: meta_, imagePasteIds: o.imagePasteIds || [],
+      });
+    } else if (o.type === 'assistant' && msg) {
+      const sidechain = !!o.isSidechain;
+      const blocks = [];
+      for (const part of msg.content || []) {
+        if (!part || typeof part !== 'object') continue;
+        if (part.type === 'text') blocks.push({ kind: 'text', text: part.text || '' });
+        else if (part.type === 'thinking') blocks.push({ kind: 'thinking', text: part.thinking || '' });
+        else if (part.type === 'reasoning') blocks.push({ kind: 'reasoning', text: part.text || '' });
+        else if (part.type === 'tool_use') blocks.push({ kind: 'tool_use', name: part.name || '?', input: part.input });
+      }
+      emit('assistant', ts, blocks, { sidechain, meta: false });
+    }
+    // file-history-snapshot / system / summary / etc.: not conversational — dropped.
+  }
+
+  // cwd = first record (by sorted timestamp, across all records) carrying a cwd,
+  // matching main()'s scan AFTER the global timestamp sort.
+  cwdCandidates.sort((a, b) => (a.ts < b.ts ? -1 : a.ts > b.ts ? 1 : 0));
+  for (const c of cwdCandidates) { if (c.cwd) { meta.cwd = c.cwd; break; } }
+
+  // extract-session.py sorts all events by ISO timestamp; Array.sort is stable
+  // (Node 12+) so equal-ts events keep emission order, matching Python.
+  events.sort((a, b) => (a.ts < b.ts ? -1 : a.ts > b.ts ? 1 : 0));
+  return { meta, events };
+}

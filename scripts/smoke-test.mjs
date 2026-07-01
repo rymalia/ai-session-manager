@@ -2,10 +2,11 @@
 // the real local data, validating the API data contract. Run with `npm test`.
 // Exits non-zero on any failure.
 import os from 'node:os';
-import { listConversations, getConversation, SOURCE_META } from '../server/sources/index.js';
+import { listConversations, getConversation, collectEvents, exportCapableSources, SOURCE_META } from '../server/sources/index.js';
 import { getUsage } from '../server/usage.js';
 import { openPath } from '../server/open.js';
 import { searchContent } from '../server/search.js';
+import { renderMarkdown, truncate } from '../server/export.js';
 
 let pass = 0;
 const fails = [];
@@ -88,6 +89,83 @@ for (const [src, ref] of Object.entries(SIBLING)) {
     if (leaked) throw new Error(`read sibling path: ${ref}`);
   });
 }
+
+// ---- security: markdown export (collectEvents) rejects the same bad refs ----
+// Mirrors the getConversation guards above but for the /api/export path. This
+// imports collectEvents directly (no HTTP), so it asserts the adapter's
+// isInside() guard, not a live endpoint. See ADR-0011.
+for (const src of exportCapableSources()) {
+  await acheck(`export-security[${src}] rejects traversal + sibling-prefix`, async () => {
+    const bad = [...EVIL, SIBLING[src]].filter(Boolean);
+    for (const ref of bad) {
+      let leaked = false;
+      try { await collectEvents(src, ref, {}); leaked = true; } catch { /* rejected = good */ }
+      if (leaked) throw new Error(`export read disallowed ref: ${ref}`);
+    }
+  });
+}
+
+// ---- renderer unit tests (deterministic, synthetic blocks; no data dep) ------
+// Guards the render_event port's invariants (ADR-0010): one header per event,
+// turn counting, code-point-accurate truncation, the encrypted-reasoning
+// placeholder, and isMeta suppression. These hold regardless of local data.
+const countMatches = (s, re) => (s.match(re) || []).length;
+const META = { sessionId: 't' };
+const FULL = { full: true, tools: true, toolResults: true, thinking: true, sidechains: true };
+
+// (1) grouping: a multi-block assistant message emits exactly ONE header + 1 turn.
+await acheck('render: one header per multi-block assistant event', async () => {
+  const ev = { role: 'assistant', ts: '2026-01-01T00:00:00Z', source: 'main', blocks: [
+    { kind: 'text', text: 'hello' },
+    { kind: 'thinking', text: 'hmm' },
+    { kind: 'tool_use', name: 'Read', input: { file_path: '/x' } },
+  ] };
+  const md = renderMarkdown([ev], META, FULL);
+  if (countMatches(md, /### assistant ·/g) !== 1) throw new Error('expected exactly one assistant header');
+  if (!/- \*\*turns\*\*: 1\b/.test(md)) throw new Error('expected turns=1');
+});
+
+// (2) turn counting: a tools-only assistant event with tools OFF adds no header/turn.
+await acheck('render: filtered-out tool_use event counts 0 turns', async () => {
+  const ev = { role: 'assistant', ts: '', source: 'main', blocks: [
+    { kind: 'tool_use', name: 'Bash', input: { command: 'ls' } },
+  ] };
+  const md = renderMarkdown([ev], META, { maxChars: 400 }); // tools off
+  if (countMatches(md, /### assistant ·/g) !== 0) throw new Error('expected no assistant header');
+  if (!/- \*\*turns\*\*: 0\b/.test(md)) throw new Error('expected turns=0');
+});
+
+// (3) a user event with text + image + tool_result is still ONE turn (one user header).
+await acheck('render: mixed user event is one turn', async () => {
+  const ev = { role: 'user', ts: '', source: 'main', imagePasteIds: [], blocks: [
+    { kind: 'text', text: 'look at this' },
+    { kind: 'image', mediaType: 'image/png', source: { type: 'base64', data: 'AAAA' } },
+    { kind: 'tool_result', text: 'result body' },
+  ] };
+  const md = renderMarkdown([ev], META, FULL);
+  if (countMatches(md, /### user ·/g) !== 1) throw new Error('expected exactly one user header');
+  if (!/- \*\*turns\*\*: 1\b/.test(md)) throw new Error('expected turns=1');
+});
+
+// (4) truncation is code-point accurate (non-BMP), not UTF-16.
+check('render: truncate counts code points', truncate('😀'.repeat(10), 4) === '😀😀😀😀… [+6 chars]');
+check('render: truncate leaves short strings intact', truncate('short', 400) === 'short');
+
+// (5) empty reasoning → the encrypted placeholder (Codex parity).
+await acheck('render: empty reasoning shows encrypted placeholder', async () => {
+  const ev = { role: 'assistant', ts: '', source: 'main', blocks: [{ kind: 'reasoning', text: '' }] };
+  const md = renderMarkdown([ev], META, { thinking: true });
+  if (!md.includes('> _reasoning:_ [encrypted by Codex]')) throw new Error('missing encrypted placeholder');
+});
+
+// (6) isMeta user turns are suppressed unless --verbatim.
+await acheck('render: isMeta user suppressed unless verbatim', async () => {
+  const ev = { role: 'user', ts: '', source: 'main', meta: true, blocks: [{ kind: 'text', text: 'command body' }] };
+  if (countMatches(renderMarkdown([ev], META, {}), /### user ·/g) !== 0)
+    throw new Error('isMeta user should be hidden by default');
+  if (countMatches(renderMarkdown([ev], META, { verbatim: true }), /### user ·/g) !== 1)
+    throw new Error('isMeta user should appear with verbatim');
+});
 
 // ---- full-content search ----
 await acheck('content search builds index + matches', async () => {
