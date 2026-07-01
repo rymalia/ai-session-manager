@@ -1,0 +1,2 @@
+{"timestamp":"2026-01-02T03:04:05.000Z","type":"session_meta","payload":{"id":"fixture-codex-local-images","cwd":"/tmp/redacted-project","model":"gpt-fixture","cli_version":"0.0.0"}}
+{"timestamp":"2026-01-02T03:04:06.000Z","type":"event_msg","payload":{"type":"user_message","message":"Inspect these images.","images":[],"local_images":["/tmp/redacted-image-1.png","/tmp/redacted-image-2.png"]}}

@@ -14,6 +14,7 @@
 //
 // Pinned reference sessions (see handoff / ADRs):
 //   codex : ~/.codex/sessions/2026/06/30/rollout-*-019f1a6e-*.jsonl  (39 turns)
+//           ~/.codex/sessions/2026/06/11/rollout-*-019eb994-*.jsonl  (images: [] + local_images)
 //   claude: ~/.claude/projects/-Users-rymalia-projects/0af8a8ed-51cd-44f8-8afb-9dbd7f1d6337.jsonl
 //           (text + 1 image + 32 thinking + 26 tool_use + 26 tool_result; NO index
 //            entry — which is the normal case: 0 of 8420 live transcripts are in

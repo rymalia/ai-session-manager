@@ -238,7 +238,7 @@ export async function collectEvents(ref, _opts = {}) {
       // response_items or are bookkeeping — skip.
       if (p.type === 'user_message') {
         let text = p.message || '';
-        const imgs = p.images || p.local_images || [];
+        const imgs = (Array.isArray(p.images) && p.images.length ? p.images : p.local_images) || [];
         if (imgs.length) {
           const note = `[${imgs.length} image(s) attached]`;
           text = text.trim() ? `${text}\n\n${note}` : note;

@@ -2,6 +2,10 @@
 // the real local data, validating the API data contract. Run with `npm test`.
 // Exits non-zero on any failure.
 import os from 'node:os';
+import fs from 'node:fs';
+import path from 'node:path';
+import { execFileSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 import { listConversations, getConversation, collectEvents, exportCapableSources, SOURCE_META } from '../server/sources/index.js';
 import { getUsage } from '../server/usage.js';
 import { openPath } from '../server/open.js';
@@ -158,7 +162,37 @@ await acheck('render: empty reasoning shows encrypted placeholder', async () => 
   if (!md.includes('> _reasoning:_ [encrypted by Codex]')) throw new Error('missing encrypted placeholder');
 });
 
-// (6) isMeta user turns are suppressed unless --verbatim.
+// (6) Codex user_message mirrors Python's `images or local_images`: an empty
+// images array falls through to local_images. Stage the checked-in fixture
+// under an isolated HOME so the real adapter path guard remains exercised.
+await acheck('codex export: empty images falls back to local_images', async () => {
+  const tempHome = fs.mkdtempSync(path.join(os.tmpdir(), 'asm-codex-parity-'));
+  try {
+    const staged = path.join(tempHome, '.codex', 'sessions', '2026', '01', '02', 'rollout-fixture.jsonl');
+    fs.mkdirSync(path.dirname(staged), { recursive: true });
+    fs.copyFileSync(
+      fileURLToPath(new URL('./fixtures/codex-empty-images-local-images.jsonl', import.meta.url)),
+      staged,
+    );
+    execFileSync(
+      process.execPath,
+      [fileURLToPath(new URL('./export-parity.mjs', import.meta.url)), 'codex', staged],
+      {
+        env: {
+          ...process.env,
+          HOME: tempHome,
+          EXTRACT_PY: process.env.EXTRACT_PY
+            || path.join(os.homedir(), 'projects', 'claude-session-tools', 'plugins', 'session-tools', 'scripts', 'extract-session.py'),
+        },
+        encoding: 'utf8',
+      },
+    );
+  } finally {
+    fs.rmSync(tempHome, { recursive: true, force: true });
+  }
+});
+
+// (7) isMeta user turns are suppressed unless --verbatim.
 await acheck('render: isMeta user suppressed unless verbatim', async () => {
   const ev = { role: 'user', ts: '', source: 'main', meta: true, blocks: [{ kind: 'text', text: 'command body' }] };
   if (countMatches(renderMarkdown([ev], META, {}), /### user ·/g) !== 0)
