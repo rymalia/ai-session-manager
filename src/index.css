@@ -9,6 +9,9 @@
   --accent-dim: #b35f43;
   --user: #2f81f7;
   --tool: #6e7681;
+  --ok: #3fb950;
+  --warn: #d29922;
+  --danger: #f85149;
 }
 
 * { box-sizing: border-box; }
@@ -184,6 +187,17 @@ select {
   font-weight: 600;
   background: transparent;
 }
+/* Per-session context-health pill. Coloured by percentLeft; the token count is
+   always shown, the percentage only when a window is known. */
+.badge.ctx {
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  cursor: help;
+}
+.badge.ctx-ok { color: var(--ok); border-color: var(--ok); }
+.badge.ctx-warn { color: var(--warn); border-color: var(--warn); }
+.badge.ctx-low { color: var(--danger); border-color: var(--danger); }
+.badge.ctx-neutral { color: var(--muted); border-color: var(--border); }
 
 .star-btn {
   background: transparent;

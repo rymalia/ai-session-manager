@@ -69,6 +69,64 @@ function SourceBadge({ source, meta }) {
   );
 }
 
+// Compact token count for the context badge: 145979 → "146k", 1_200_000 → "1.2M".
+function fmtCtxTokens(n) {
+  if (!Number.isFinite(n) || n <= 0) return '0';
+  if (n >= 1e6) return (n / 1e6).toFixed(1).replace(/\.0$/, '') + 'm';
+  if (n >= 1e3) return Math.round(n / 1e3) + 'k';
+  return String(n);
+}
+
+// Per-session context-health pill: "150k ctx · ~25% left". The token count is
+// always measured; the percentage carries a ~ only when estimated (Claude), and
+// the pill is coloured by percentLeft. Nothing renders when cu is null. See
+// docs/plan-asm-context-health-2026-07-01.md §3.
+function ContextBadge({ cu }) {
+  if (!cu || !Number.isFinite(cu.usedTokens)) return null;
+  const { usedTokens, windowTokens, percentLeft, basis, windowBasis, model, measuredAt, compactions } = cu;
+  const estimated = basis === 'estimated';
+
+  const tokenPart = `${fmtCtxTokens(usedTokens)} ctx`;
+  const pctPart = percentLeft == null ? null : `${estimated ? '~' : ''}${percentLeft}% left`;
+  const label = pctPart ? `${tokenPart} · ${pctPart}` : tokenPart;
+
+  const tone = percentLeft == null ? 'neutral'
+    : percentLeft >= 50 ? 'ok'
+    : percentLeft >= 20 ? 'warn'
+    : 'low';
+
+  // Tooltip: raw values, model, basis line, timestamp, and the Claude caveat.
+  const basisLine = basis === 'reported'
+    ? 'Reported by Codex'
+    : windowBasis === 'observed-1m'
+      ? 'Estimated — 1M window inferred from this session’s history'
+      : 'Estimated — Claude stores no window; assumed 200k';
+  const lines = [
+    windowTokens
+      ? `${usedTokens.toLocaleString()} / ${windowTokens.toLocaleString()} tokens`
+      : `${usedTokens.toLocaleString()} tokens · window unknown`,
+    model ? `model: ${model}` : null,
+    basisLine,
+    measuredAt ? `last recorded ${new Date(measuredAt).toLocaleString()}` : null,
+    estimated ? 'Not Claude Code’s configurable auto-compaction threshold.' : null,
+    estimated && compactions > 0
+      ? `Compacted ${compactions}× — context shown is since the last compaction.`
+      : null,
+  ].filter(Boolean);
+
+  // title keeps newlines for the hover tooltip; aria-label uses the same text
+  // joined with ' · ' since screen readers flatten newlines (plan §7 step 3).
+  return (
+    <span
+      className={`badge ctx ctx-${tone}`}
+      title={lines.join('\n')}
+      aria-label={lines.join(' · ')}
+    >
+      {label}
+    </span>
+  );
+}
+
 // Opens the conversation's project folder in the OS default file manager.
 function OpenButton({ path }) {
   const [state, setState] = useState(''); // '' | 'ok' | 'err'
@@ -203,6 +261,7 @@ const ConversationCard = memo(function ConversationCard({
             <SourceBadge source={convo.source} meta={meta} />
             <span className="badge project">{highlight(convo.projectLabel, query)}</span>
             {convo.gitBranch && <span className="badge branch">⎇ {convo.gitBranch}</span>}
+            <ContextBadge cu={convo.contextUsage} />
             <span className="badge">{convo.messageCount} msgs</span>
             <span className="badge time">{relativeTime(convo.lastActivity)}</span>
           </div>
