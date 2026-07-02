@@ -5,6 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import readline from 'node:readline';
 import { makeEntry, cdPrefix, toolUseLine, toolResultLine, thinkingLine, isInside } from './_shared.js';
+import { finalizeContextUsage } from '../contextUsage.js';
 
 const HOME = os.homedir();
 const ROOT = path.join(HOME, '.codex', 'sessions');
@@ -57,6 +58,10 @@ async function readSession(file, { wantMessages = false, lastN = 30 } = {}) {
   });
   let id = null, cwd = null, gitBranch = null, lastTs = null, firstUserText = '';
   let userCount = 0, assistantCount = 0;
+  // Context health: model comes from session_meta / turn_context (latest wins);
+  // used/window come from the LAST token_count event (last_token_usage is the
+  // most recent request's real footprint — the resume-relevant number).
+  let ctxModel = null, ctxUsed = null, ctxWindow = null, ctxTs = null;
   const messages = wantMessages ? [] : null;
 
   for await (const line of rl) {
@@ -68,8 +73,19 @@ async function readSession(file, { wantMessages = false, lastN = 30 } = {}) {
     if (o.type === 'session_meta') {
       if (p.id) id = p.id;
       if (p.cwd) cwd = p.cwd;
+      if (p.model) ctxModel = p.model;
       const g = p.git || p.git_info;
       if (g && (g.branch || g.current_branch)) gitBranch = g.branch || g.current_branch;
+      continue;
+    }
+    if (o.type === 'turn_context') { if (p.model) ctxModel = p.model; continue; }
+    if (o.type === 'event_msg' && p.type === 'token_count' && p.info) {
+      const last = p.info.last_token_usage;
+      if (last && Number.isFinite(last.total_tokens)) {
+        ctxUsed = last.total_tokens;
+        ctxWindow = Number.isFinite(p.info.model_context_window) ? p.info.model_context_window : null;
+        ctxTs = o.timestamp || lastTs;
+      }
       continue;
     }
     if (o.type !== 'response_item') continue;
@@ -101,8 +117,14 @@ async function readSession(file, { wantMessages = false, lastN = 30 } = {}) {
       messages.push({ role: 'tool', text: toolResultLine(out), ts: o.timestamp || null });
     }
   }
+  const contextUsage = ctxUsed != null
+    ? finalizeContextUsage({
+        usedTokens: ctxUsed, windowTokens: ctxWindow, model: ctxModel,
+        measuredAt: ctxTs, basis: 'reported', windowBasis: 'recorded', compactions: 0,
+      })
+    : null;
   return {
-    summary: { id, cwd, gitBranch, lastTs, firstUserText, userCount, assistantCount },
+    summary: { id, cwd, gitBranch, lastTs, firstUserText, userCount, assistantCount, contextUsage },
     messages: messages ? messages.slice(-lastN) : null,
   };
 }
@@ -135,6 +157,7 @@ export async function list() {
       lastActivity: summary.lastTs || stat.mtime.toISOString(),
       mtimeMs: stat.mtimeMs, firstUserText: summary.firstUserText,
       resume: `${cdPrefix(cwd)}codex resume ${id}`,
+      contextUsage: summary.contextUsage,
     }));
   }
   return out;

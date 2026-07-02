@@ -5,6 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import readline from 'node:readline';
 import { makeEntry, cdPrefix, clip, toolUseLine, toolResultLine, thinkingLine, isInside } from './_shared.js';
+import { createClaudeContextTracker } from '../contextUsage.js';
 
 const ROOT = path.join(os.homedir(), '.claude', 'projects');
 export const source = 'claude';
@@ -53,11 +54,13 @@ async function readSession(file, { wantMessages = false, lastN = 30 } = {}) {
   let title = null, firstUserText = '', cwd = null, gitBranch = null, lastTs = null;
   let userCount = 0, assistantCount = 0;
   const messages = wantMessages ? [] : null;
+  const ctx = createClaudeContextTracker();
 
   for await (const line of rl) {
     const t = line.trim();
     if (!t) continue;
     let o; try { o = JSON.parse(t); } catch { continue; }
+    ctx.push(o); // per-session context health — ignores non-eligible records
     if (o.type === 'ai-title' && o.aiTitle) { title = o.aiTitle; continue; }
     if (o.cwd) cwd = o.cwd;
     if (o.gitBranch) gitBranch = o.gitBranch;
@@ -75,7 +78,7 @@ async function readSession(file, { wantMessages = false, lastN = 30 } = {}) {
     }
   }
   return {
-    summary: { title, firstUserText, cwd, gitBranch, lastTs, userCount, assistantCount },
+    summary: { title, firstUserText, cwd, gitBranch, lastTs, userCount, assistantCount, contextUsage: ctx.finalize() },
     messages: messages ? messages.slice(-lastN) : null,
   };
 }
@@ -114,6 +117,7 @@ export async function list() {
         lastActivity: summary.lastTs || stat.mtime.toISOString(),
         mtimeMs: stat.mtimeMs, firstUserText: summary.firstUserText,
         resume: `${cdPrefix(cwd)}claude --resume ${id}`,
+        contextUsage: summary.contextUsage,
       }));
     }
   }
