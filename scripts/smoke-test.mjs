@@ -10,7 +10,8 @@ import { listConversations, getConversation, collectEvents, exportCapableSources
 import { getUsage } from '../server/usage.js';
 import { openPath } from '../server/open.js';
 import { searchContent } from '../server/search.js';
-import { renderMarkdown, truncate } from '../server/export.js';
+import { renderMarkdown, truncate, deriveContentDisposition } from '../server/export.js';
+import { apiMiddleware } from '../vite.config.js';
 
 let pass = 0;
 const fails = [];
@@ -108,6 +109,61 @@ for (const src of exportCapableSources()) {
     }
   });
 }
+
+// ---- endpoint hygiene: dispatch, no-store, Content-Disposition (plan §9) -----
+// Prototype-property source names (toString/constructor/__proto__) must resolve
+// to 'unsupported' (→ HTTP 400), not reach an inherited fn and TypeError (→ 500).
+for (const name of ['toString', 'constructor', '__proto__']) {
+  await acheck(`export dispatch: prototype name '${name}' → unsupported`, async () => {
+    let code;
+    try { await collectEvents(name, 'x', {}); } catch (e) { code = e.code; }
+    if (code !== 'unsupported') throw new Error(`expected code 'unsupported', got ${code}`);
+  });
+}
+
+// deriveContentDisposition hardens the download filename against a hostile local
+// sessionId: ASCII filename="" is injection-safe (no quote/CR/LF), the RFC 5987
+// filename* is well-formed (no raw ' ( ) * " CR LF), and a surrogate-splitting id
+// never throws in encodeURIComponent.
+check('content-disposition: hostile id → injection-safe filename', (() => {
+  const cd = deriveContentDisposition('a"b\r\n(c)*', []);
+  const m = /^attachment; filename="([^"]*)"; filename\*=UTF-8''(.+)$/.exec(cd);
+  return !!m && !/["\r\n]/.test(m[1]) && !/['()*"\r\n]/.test(m[2]);
+})());
+check('content-disposition: emoji-boundary id does not throw', (() => {
+  try { return deriveContentDisposition('1234567😀', []).includes("filename*=UTF-8''"); }
+  catch { return false; }
+})());
+check('content-disposition: lone-surrogate id does not throw', (() => {
+  try { deriveContentDisposition('12345\uD83Dx', []); return true; } catch { return false; }
+})());
+
+// Endpoint-level: drive apiMiddleware with a mock req/res (no socket) and assert
+// Cache-Control: no-store on every export exit, including 4xx error paths.
+function mockRes() {
+  const h = {};
+  return {
+    statusCode: 0,
+    setHeader(k, v) { h[k.toLowerCase()] = v; },
+    getHeader(k) { return h[k.toLowerCase()]; },
+    end() { this.ended = true; },
+  };
+}
+async function callApi(pathname) {
+  const res = mockRes();
+  await apiMiddleware({ url: pathname, method: 'GET' }, res, () => { res.nextCalled = true; });
+  return res;
+}
+await acheck('export endpoint: missing source/ref → 400 + no-store', async () => {
+  const res = await callApi('/api/export');
+  if (res.statusCode !== 400) throw new Error(`expected 400, got ${res.statusCode}`);
+  if (res.getHeader('cache-control') !== 'no-store') throw new Error('missing Cache-Control: no-store');
+});
+await acheck('export endpoint: unsupported source → 400 + no-store', async () => {
+  const res = await callApi('/api/export?source=toString&ref=x');
+  if (res.statusCode !== 400) throw new Error(`expected 400, got ${res.statusCode}`);
+  if (res.getHeader('cache-control') !== 'no-store') throw new Error('missing Cache-Control: no-store');
+});
 
 // ---- renderer unit tests (deterministic, synthetic blocks; no data dep) ------
 // Guards the render_event port's invariants (ADR-0010): one header per event,

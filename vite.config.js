@@ -1,7 +1,7 @@
 import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
 import { listConversations, getConversation, SOURCE_META, collectEvents, exportCapableSources } from './server/sources/index.js';
-import { renderMarkdown, deriveFlagTokens, deriveExportFilename } from './server/export.js';
+import { renderMarkdown, deriveFlagTokens, deriveContentDisposition } from './server/export.js';
 import { getUsage } from './server/usage.js';
 import { openPath } from './server/open.js';
 import { getAgents, openAgentTerminal, updateAgent } from './server/agents.js';
@@ -10,7 +10,7 @@ import { searchContent, warmIndex } from './server/search.js';
 // API that reads local transcripts from every supported AI coding tool and
 // serves a unified list. Registered on BOTH the dev server and the preview
 // server, so a built `dist/` is fully functional via `npm run preview`.
-async function apiMiddleware(req, res, next) {
+export async function apiMiddleware(req, res, next) {
   const url = new URL(req.url, 'http://localhost');
   const json = (code, body) => {
     res.statusCode = code;
@@ -26,6 +26,10 @@ async function apiMiddleware(req, res, next) {
   }
 
   if (url.pathname === '/api/export') {
+    // no-store on EVERY export exit (incl. 4xx/5xx): error bodies can echo private
+    // absolute paths, and they must never be cached. Set before any return; json()
+    // and res.end() send pending headers, and no later middleware runs (no next()).
+    res.setHeader('Cache-Control', 'no-store');
     const source = url.searchParams.get('source');
     const ref = url.searchParams.get('ref');
     if (!source || !ref) return json(400, { error: 'missing source or ref' });
@@ -57,9 +61,8 @@ async function apiMiddleware(req, res, next) {
       const md = renderMarkdown(events, meta, opts);
       res.statusCode = 200;
       res.setHeader('Content-Type', opts.raw ? 'text/plain; charset=utf-8' : 'text/markdown; charset=utf-8');
-      res.setHeader('Cache-Control', 'no-store'); // private transcript content
       if (q.get('download') === '1') {
-        res.setHeader('Content-Disposition', `attachment; filename="${deriveExportFilename(meta.sessionId, tokens)}"`);
+        res.setHeader('Content-Disposition', deriveContentDisposition(meta.sessionId, tokens));
       }
       res.end(md);
     } catch (e) {

@@ -56,7 +56,11 @@ const EXPORTERS = Object.fromEntries(
 export function exportCapableSources() { return Object.keys(EXPORTERS); }
 
 export async function collectEvents(sourceName, ref, opts) {
-  const a = EXPORTERS[sourceName];
-  if (!a) { const e = new Error('export not supported for ' + sourceName); e.code = 'unsupported'; throw e; }
-  return a.collectEvents(ref, opts); // adapter validates ref (isInside) itself
+  // Object.hasOwn (not `EXPORTERS[name]`) so inherited prototype names
+  // (toString / constructor / __proto__) resolve to a clean 'unsupported' (→ 400)
+  // instead of reaching an inherited function and 500-ing on a.collectEvents().
+  if (!Object.hasOwn(EXPORTERS, sourceName)) {
+    const e = new Error('export not supported for ' + sourceName); e.code = 'unsupported'; throw e;
+  }
+  return EXPORTERS[sourceName].collectEvents(ref, opts); // adapter validates ref (isInside) itself
 }

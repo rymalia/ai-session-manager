@@ -243,7 +243,27 @@ export function deriveFlagTokens(o) {
 
 // Streamed download: no filesystem collision loop (the browser de-dupes with
 // " (1)"). Port derive_output_path's -2/-3 loop only if a server-side save mode
-// is added later. Stem is `replay-<short>` for /replay parity.
+// is added later. Stem is `replay-<short>` for /replay parity. The 8-char slice
+// is CODE-POINT based (Array.from), matching Python's `session_id[:8]` — a UTF-16
+// .slice() could bisect an emoji surrogate pair and produce a lone surrogate that
+// crashes encodeURIComponent downstream (deriveContentDisposition).
 export function deriveExportFilename(sessionId, tokens) {
-  return ['replay', (sessionId || 'session').slice(0, 8), ...tokens].join('-') + '.md';
+  const stem = Array.from(sessionId || 'session').slice(0, 8).join('');
+  return ['replay', stem, ...tokens].join('-') + '.md';
+}
+
+// Build a safe RFC 6266 Content-Disposition value from an UNTRUSTED sessionId (a
+// local filename stem the client supplies indirectly via `ref`). Two params:
+//   filename="…"       — ASCII-only fallback; every non-token char → '_' so no
+//                        quote/CR/LF can escape the quoted-string (header injection).
+//   filename*=UTF-8''… — RFC 5987 ext-value. `.toWellFormed()` first so a lone
+//                        surrogate can't throw in encodeURIComponent; then also
+//                        percent-encode ' ( ) * — encodeURIComponent leaves those
+//                        literal but they are NOT RFC 5987 attr-char.
+export function deriveContentDisposition(sessionId, tokens) {
+  const fname = deriveExportFilename(sessionId, tokens);
+  const ascii = fname.replace(/[^A-Za-z0-9._-]/g, '_') || 'replay.md';
+  const ext = encodeURIComponent(fname.toWellFormed())
+    .replace(/['()*]/g, (c) => '%' + c.charCodeAt(0).toString(16).toUpperCase());
+  return `attachment; filename="${ascii}"; filename*=UTF-8''${ext}`;
 }
