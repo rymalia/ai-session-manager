@@ -4,6 +4,8 @@ import MiniStats from './MiniStats.jsx';
 import Usage from './Usage.jsx';
 import Agents from './Agents.jsx';
 import { SORT_OPTIONS, sortConvos } from './sortConvos.js';
+import ExportMenu from './ExportMenu.jsx';
+import { normalizeExportOpts } from './exportOptions.js';
 import './sort.css';
 
 // Fallback source metadata; replaced by /api/sources on load.
@@ -225,6 +227,7 @@ const Message = memo(function Message({ msg, assistantLabel }) {
 
 const ConversationCard = memo(function ConversationCard({
   convo, meta, expanded, onToggle, query, starred, onToggleStar, snippet, tick,
+  exportOpts, onChangeExportOpts,
 }) {
   const [detail, setDetail] = useState(null);
   const [loading, setLoading] = useState(false);
@@ -252,6 +255,9 @@ const ConversationCard = memo(function ConversationCard({
         tabIndex={0}
         aria-expanded={expanded}
         onKeyDown={(e) => {
+          // Only the card-head itself toggles; ignore Enter/Space bubbling up
+          // from descendant controls (Star/Copy/Open, the export menu, etc.).
+          if (e.target !== e.currentTarget) return;
           if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onToggle(convo.key); }
         }}
       >
@@ -276,6 +282,16 @@ const ConversationCard = memo(function ConversationCard({
           <StarButton on={starred} onToggle={() => onToggleStar(convo.key)} />
           <CopyButton text={convo.resume} />
           <OpenButton path={convo.projectPath} />
+          {meta[convo.source]?.exportable && (
+            <ExportMenu
+              source={convo.source}
+              srcRef={convo.ref}
+              sourceLabel={(meta[convo.source] && meta[convo.source].short) || convo.source}
+              capabilities={meta[convo.source].exportCapabilities}
+              opts={exportOpts}
+              onChangeOpts={onChangeExportOpts}
+            />
+          )}
           <span className="chevron">{expanded ? '▲' : '▼'}</span>
         </div>
       </div>
@@ -318,6 +334,16 @@ function loadStarred() {
   try { return JSON.parse(localStorage.getItem(STARRED_KEY)) || []; } catch { return []; }
 }
 
+// Export options are shared across all cards (one menu open at a time) and
+// persisted here, not per-menu — a same-document localStorage write emits no
+// storage event, so per-menu copies would drift. normalizeExportOpts hardens
+// against malformed/hand-edited storage (non-object roots, bad types).
+const EXPORT_KEY = 'ccv.export';
+function loadExportOpts() {
+  try { return normalizeExportOpts(JSON.parse(localStorage.getItem(EXPORT_KEY))); }
+  catch { return normalizeExportOpts(null); }
+}
+
 export default function App() {
   const saved = loadFilters();
   const [convos, setConvos] = useState(null);
@@ -331,6 +357,7 @@ export default function App() {
   const [showAgents, setShowAgents] = useState(saved.showAgents ?? false);
   const [starredOnly, setStarredOnly] = useState(saved.starredOnly ?? false);
   const [starred, setStarred] = useState(() => new Set(loadStarred()));
+  const [exportOpts, setExportOpts] = useState(loadExportOpts);
   const [expandedKey, setExpandedKey] = useState(null);
   const searchRef = useRef(null);
   const [showTop, setShowTop] = useState(false);
@@ -365,6 +392,12 @@ export default function App() {
     (key) => setExpandedKey((prev) => (prev === key ? null : key)),
     []
   );
+
+  const changeExportOpts = useCallback((next) => {
+    const norm = normalizeExportOpts(next);
+    setExportOpts(norm);
+    try { localStorage.setItem(EXPORT_KEY, JSON.stringify(norm)); } catch {}
+  }, []);
 
   // Save filters (and view prefs) whenever they change.
   useEffect(() => {
@@ -673,6 +706,8 @@ export default function App() {
             expanded={expandedKey === c.key}
             onToggle={toggleExpand}
             tick={tick}
+            exportOpts={exportOpts}
+            onChangeExportOpts={changeExportOpts}
           />
         ))}
         {sorted.length > limit && (

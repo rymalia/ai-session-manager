@@ -13,6 +13,7 @@ import { searchContent } from '../server/search.js';
 import { renderMarkdown, truncate, deriveContentDisposition, deriveFlagTokens, deriveExportFilename, resolveExportOptions } from '../server/export.js';
 import { parseClaudeUsage, finalizeContextUsage, createClaudeContextTracker } from '../server/contextUsage.js';
 import { apiMiddleware } from '../vite.config.js';
+import { normalizeExportOpts, buildExportQuery, clampMaxChars, DEFAULT_EXPORT_OPTS } from '../src/exportOptions.js';
 
 let pass = 0;
 const fails = [];
@@ -530,6 +531,65 @@ const rejects = (p) => { try { openPath(p); return false; } catch { return true;
 check('openPath rejects nonexistent path', rejects('/definitely/not/real/xyz-123'));
 check('openPath rejects empty path', rejects(''));
 check('openPath rejects null', rejects(null));
+
+// ---- frontend export-option helpers (src/exportOptions.js) ----
+// These enforce the UI's two promises: persisted options are always
+// schema-validated, and the built query can NEVER carry an option the source
+// doesn't support (so the UI can't trigger /api/export's explicit-unavailable
+// 400). Pure functions, so they're testable without a browser (Codex plan
+// review, Major #5/#6/#7). CLAUDE_CAPS / CODEX_CAPS are the real adapter
+// capabilities declared above.
+const parseQ = (qs) => new URLSearchParams(qs);
+
+check('exportOpts: null root → defaults', () =>
+  JSON.stringify(normalizeExportOpts(null)) === JSON.stringify(DEFAULT_EXPORT_OPTS));
+check('exportOpts: array root → defaults', () =>
+  JSON.stringify(normalizeExportOpts([1, 2])) === JSON.stringify(DEFAULT_EXPORT_OPTS));
+check('exportOpts: string root → defaults', () =>
+  JSON.stringify(normalizeExportOpts('nope')) === JSON.stringify(DEFAULT_EXPORT_OPTS));
+check('exportOpts: bad types coerced, unknown keys dropped', () => {
+  const o = normalizeExportOpts({ tools: 'yes', full: 1, history: 'weird', maxChars: '999', bogus: true });
+  return o.tools === false && o.full === false && o.history === 'auto' && o.maxChars === 999 && !('bogus' in o);
+});
+check('exportOpts: valid values preserved', () => {
+  const o = normalizeExportOpts({ tools: true, full: true, history: 'off', maxChars: 1200 });
+  return o.tools === true && o.full === true && o.history === 'off' && o.maxChars === 1200;
+});
+check('clampMaxChars: bounds + non-numeric', () =>
+  clampMaxChars(0) === 1 && clampMaxChars(999999) === 20000 && clampMaxChars('x') === 400 && clampMaxChars(400) === 400);
+
+check('buildQuery: full excludes its four constituents (no 400 for codex sidechains)', () => {
+  const q = parseQ(buildExportQuery({ source: 'codex', ref: '/r', opts: { full: true, sidechains: true, tools: true }, capabilities: CODEX_CAPS }));
+  return q.get('full') === '1' && !q.has('sidechains') && !q.has('tools') && !q.has('toolResults') && !q.has('thinking');
+});
+check('buildQuery: claude history="on" (unavailable) is dropped', () => {
+  const q = parseQ(buildExportQuery({ source: 'claude', ref: '/r', opts: { history: 'on' }, capabilities: CLAUDE_CAPS }));
+  return !q.has('history');
+});
+check('buildQuery: codex notApplicable flags dropped, supported kept', () => {
+  const q = parseQ(buildExportQuery({ source: 'codex', ref: '/r', opts: { verbatim: true, embedImages: true, thinking: true, raw: true }, capabilities: CODEX_CAPS }));
+  return !q.has('verbatim') && !q.has('embedImages') && q.get('thinking') === '1' && q.get('raw') === '1';
+});
+check('buildQuery: history sent only when supported and not auto', () => {
+  const caps = { ...CLAUDE_CAPS, history: 'supported' };
+  const on = parseQ(buildExportQuery({ source: 'claude', ref: '/r', opts: { history: 'off' }, capabilities: caps }));
+  const auto = parseQ(buildExportQuery({ source: 'claude', ref: '/r', opts: { history: 'auto' }, capabilities: caps }));
+  return on.get('history') === 'off' && !auto.has('history');
+});
+check('buildQuery: maxChars omitted at default, included otherwise', () => {
+  const def = parseQ(buildExportQuery({ source: 'claude', ref: '/r', opts: { maxChars: 400 }, capabilities: CLAUDE_CAPS }));
+  const big = parseQ(buildExportQuery({ source: 'claude', ref: '/r', opts: { maxChars: 8000 }, capabilities: CLAUDE_CAPS }));
+  return !def.has('maxChars') && big.get('maxChars') === '8000';
+});
+check('buildQuery: download flag adds download=1', () => {
+  const q = parseQ(buildExportQuery({ source: 'claude', ref: '/r', opts: {}, capabilities: CLAUDE_CAPS, download: true }));
+  return q.get('download') === '1';
+});
+check('buildQuery: reserved/unicode ref round-trips via URLSearchParams', () => {
+  const ref = '/Users/x/proj & co/a+b#c/日本語/rollout.jsonl';
+  const q = parseQ(buildExportQuery({ source: 'codex', ref, opts: {}, capabilities: CODEX_CAPS }));
+  return q.get('ref') === ref && q.get('source') === 'codex';
+});
 
 // ---- report ----
 const ms = Date.now() - t0;

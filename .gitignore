@@ -7,3 +7,6 @@ dist/
 .claude/
 .vscode/
 .idea/
+
+# Codex plan-review scratch (not a deliverable)
+.codex-loop/

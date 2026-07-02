@@ -1,0 +1,129 @@
+/* Export control + options popover. Shares the design tokens in index.css.
+   The panel is a native Popover API element (top layer), positioned via inline
+   top/left set in JS — do NOT set `display` on .exp-panel or it breaks the UA's
+   :popover-open show/hide. Prefix: exp-. */
+
+.exp-wrap { display: inline-flex; }
+
+.exp-trigger {
+  background: var(--panel2);
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  color: var(--text);
+  font-size: 12.5px;
+  padding: 7px 11px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.exp-trigger:hover { border-color: var(--accent-dim); }
+.exp-trigger.exp-open { border-color: var(--accent); color: var(--accent); }
+
+.exp-panel {
+  position: fixed;
+  margin: 0;
+  inset: auto; /* override UA centering; JS sets top/left */
+  width: 300px;
+  max-width: calc(100vw - 16px);
+  max-height: calc(100vh - 24px);
+  overflow-y: auto;
+  background: var(--panel);
+  color: var(--text);
+  border: 1px solid var(--accent-dim);
+  border-radius: 10px;
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.5);
+  padding: 12px;
+  font-size: 13px;
+}
+.exp-panel::backdrop { background: transparent; }
+
+.exp-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 10px;
+}
+.exp-title { font-weight: 600; }
+.exp-close {
+  background: transparent;
+  border: none;
+  color: var(--muted);
+  font-size: 18px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0 4px;
+}
+.exp-close:hover { color: var(--text); }
+
+.exp-full {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  margin-bottom: 10px;
+  background: var(--panel2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  cursor: pointer;
+}
+.exp-full-label { font-weight: 600; }
+.exp-hint { color: var(--muted); font-size: 10.5px; margin-left: auto; }
+
+.exp-flags { display: flex; flex-direction: column; gap: 1px; margin-bottom: 8px; }
+.exp-row { display: flex; align-items: center; gap: 8px; padding: 3px 2px; }
+.exp-row label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1;
+  cursor: pointer;
+}
+.exp-row.exp-disabled { opacity: 0.5; }
+.exp-row.exp-disabled label { cursor: not-allowed; }
+.exp-note {
+  color: var(--muted);
+  font-size: 10.5px;
+  margin-left: auto;
+  white-space: nowrap;
+}
+
+.exp-field { display: flex; align-items: center; gap: 8px; margin: 8px 0; }
+.exp-field > label { color: var(--muted); min-width: 66px; }
+.exp-field select,
+.exp-field input {
+  background: var(--panel2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text);
+  padding: 5px 7px;
+  font-size: 12.5px;
+}
+.exp-field input[type='number'] { width: 90px; }
+.exp-field select:focus,
+.exp-field input:focus { outline: none; border-color: var(--accent); }
+
+.exp-actions { display: flex; gap: 8px; margin-top: 12px; }
+.exp-btn {
+  flex: 1;
+  text-align: center;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  padding: 8px 10px;
+  font-size: 12.5px;
+  font-weight: 600;
+  cursor: pointer;
+  text-decoration: none;
+}
+.exp-copy { background: var(--accent); color: #1b1208; border-color: transparent; }
+.exp-copy:hover { background: var(--accent-dim); color: #fff; }
+.exp-copy:disabled { opacity: 0.7; cursor: default; }
+.exp-copy.exp-copied { background: #2ea043; color: #fff; }
+.exp-download { background: var(--panel2); color: var(--text); }
+.exp-download:hover { border-color: var(--accent-dim); }
+
+.exp-msg { margin-top: 10px; font-size: 12px; line-height: 1.4; }
+.exp-error { color: var(--danger); }
+.exp-overcap { color: var(--warn); }
+
+@media (max-width: 640px) {
+  .exp-panel { width: calc(100vw - 16px); }
+}
