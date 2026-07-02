@@ -1,7 +1,7 @@
 import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
-import { listConversations, getConversation, SOURCE_META, collectEvents, exportCapableSources } from './server/sources/index.js';
-import { renderMarkdown, deriveFlagTokens, deriveContentDisposition } from './server/export.js';
+import { listConversations, getConversation, SOURCE_META, collectEvents, exportCapableSources, exportCapabilities } from './server/sources/index.js';
+import { renderMarkdown, deriveFlagTokens, deriveContentDisposition, resolveExportOptions } from './server/export.js';
 import { getUsage } from './server/usage.js';
 import { openPath } from './server/open.js';
 import { getAgents, openAgentTerminal, updateAgent } from './server/agents.js';
@@ -21,7 +21,13 @@ export async function apiMiddleware(req, res, next) {
   if (url.pathname === '/api/sources') {
     const caps = new Set(exportCapableSources());
     const out = {};
-    for (const [k, v] of Object.entries(SOURCE_META)) out[k] = { ...v, exportable: caps.has(k) };
+    for (const [k, v] of Object.entries(SOURCE_META)) {
+      const exportable = caps.has(k);
+      out[k] = { ...v, exportable };
+      // Phase-accurate per-flag capabilities so the UI can grey out flags a source
+      // can't honor in this phase, and never switch on source names (ADR-0013).
+      if (exportable) out[k].exportCapabilities = exportCapabilities(k);
+    }
     return json(200, out);
   }
 
@@ -38,7 +44,7 @@ export async function apiMiddleware(req, res, next) {
     const bool = (k) => q.get(k) === '1';
     const h = q.get('history'); // 'on' | 'off' | null → auto
     const rawMax = parseInt(q.get('maxChars') || '400', 10);
-    const opts = {
+    const requested = {
       full: bool('full'),
       tools: bool('tools'),
       toolResults: bool('toolResults'),
@@ -50,17 +56,32 @@ export async function apiMiddleware(req, res, next) {
       embedImages: bool('embedImages'),
       maxChars: Number.isFinite(rawMax) ? Math.min(20000, Math.max(1, rawMax)) : 400,
     };
-    // Derive filename tokens from flags AS REQUESTED (before --full expands), then
-    // expand --full for rendering — exactly like extract-session.py.
-    const tokens = deriveFlagTokens(opts);
-    if (opts.full) opts.tools = opts.toolResults = opts.thinking = opts.sidechains = true;
-    if (source === 'codex') opts.history = 'off'; // header/filters parity
+
+    // ADR-0014 pipeline: requested → capability-validated → source-effective. For an
+    // export-capable source, validate the explicitly-selected options against its
+    // ADR-0013 capabilities and expand `full`; an explicit unavailable/notApplicable
+    // option → 400 naming it. A non-export source falls through so collectEvents
+    // throws the source-level 'unsupported' 400 instead of a confusing option 400.
+    let tokens, effective;
+    if (exportCapableSources().includes(source)) {
+      const r = resolveExportOptions(requested, exportCapabilities(source) || {});
+      if (r.error) {
+        const how = r.state === 'notApplicable' ? 'not applicable to' : 'not available for';
+        return json(400, { error: `${r.option} ${how} source '${source}'` });
+      }
+      ({ tokens, effective } = r);
+    } else {
+      // collectEvents will throw 'unsupported' before these are used; keep them coherent.
+      tokens = deriveFlagTokens(requested);
+      effective = { ...requested };
+    }
 
     try {
-      const { meta, events } = await collectEvents(source, ref, opts);
-      const md = renderMarkdown(events, meta, opts);
+      const { meta, events, resolvedOpts } = await collectEvents(source, ref, effective);
+      const finalOpts = resolvedOpts || effective; // session-resolved (ADR-0014); 1A: none
+      const md = renderMarkdown(events, meta, finalOpts);
       res.statusCode = 200;
-      res.setHeader('Content-Type', opts.raw ? 'text/plain; charset=utf-8' : 'text/markdown; charset=utf-8');
+      res.setHeader('Content-Type', finalOpts.raw ? 'text/plain; charset=utf-8' : 'text/markdown; charset=utf-8');
       if (q.get('download') === '1') {
         res.setHeader('Content-Disposition', deriveContentDisposition(meta.sessionId, tokens));
       }

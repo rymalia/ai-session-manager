@@ -260,6 +260,46 @@ export function deriveExportFilename(sessionId, tokens) {
 //                        surrogate can't throw in encodeURIComponent; then also
 //                        percent-encode ' ( ) * — encodeURIComponent leaves those
 //                        literal but they are NOT RFC 5987 attr-char.
+// ---- option-resolution pipeline (ADR-0014) ----------------------------------
+// requested → capability-validated → source-effective. Pure (no fs / no HTTP) so
+// it unit-tests off hand-built inputs; the endpoint wires it to collectEvents and
+// then to session-resolved opts. Returns either { error, option, state } (reject
+// with 400) or { tokens, effective }.
+//
+//   - Validate ONLY explicitly, individually enabled options: a content flag sent
+//     as true, or history === 'on'. `full` is a render directive, never validated,
+//     never 400s (ADR-0014). Turning an option OFF (false / history 'off') is the
+//     safe direction and is always allowed. Missing/unknown capability fails closed.
+//   - Filename tokens derive from REQUESTED opts, BEFORE `full` expands (so the token
+//     is `full`, not its four components; auto history adds no token) — ADR-0002/0008.
+//   - Source-effective: `full` expands to its four flags unconditionally; history
+//     'auto' resolves to 'off' unless history is 'supported'.
+const CONTENT_FLAGS = ['tools', 'toolResults', 'thinking', 'sidechains', 'verbatim', 'raw', 'embedImages'];
+
+// Source-effective stage, WITHOUT the capability-rejection gate: `full` expands to
+// its four flags unconditionally (a render directive), and history 'auto' resolves
+// to 'off' unless history is 'supported'. Shared by the endpoint (after validation)
+// and the golden-diff harness (which has no HTTP gate — /replay renders combos like
+// verbatim+full on Codex that the endpoint 400s), so the two can't drift.
+export function sourceEffectiveOptions(requested, capabilities) {
+  const caps = capabilities || {};
+  const effective = { ...requested };
+  if (effective.full) effective.tools = effective.toolResults = effective.thinking = effective.sidechains = true;
+  if (effective.history === 'auto' && caps.history !== 'supported') effective.history = 'off';
+  return effective;
+}
+
+export function resolveExportOptions(requested, capabilities) {
+  const caps = capabilities || {};
+  const enabled = CONTENT_FLAGS.filter((k) => requested[k] === true);
+  if (requested.history === 'on') enabled.push('history');
+  for (const opt of enabled) {
+    if (caps[opt] !== 'supported') return { error: true, option: opt, state: caps[opt] || 'unavailable' };
+  }
+  const tokens = deriveFlagTokens(requested);
+  return { tokens, effective: sourceEffectiveOptions(requested, caps) };
+}
+
 export function deriveContentDisposition(sessionId, tokens) {
   const fname = deriveExportFilename(sessionId, tokens);
   const ascii = fname.replace(/[^A-Za-z0-9._-]/g, '_') || 'replay.md';

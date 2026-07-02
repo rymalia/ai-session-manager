@@ -10,6 +10,24 @@ import { createClaudeContextTracker } from '../contextUsage.js';
 const ROOT = path.join(os.homedir(), '.claude', 'projects');
 export const source = 'claude';
 
+// Phase-accurate export capabilities (ADR-0013). Tri-value:
+//   supported     — honored now
+//   unavailable   — a real /replay feature this source WILL gain, not built in 1A
+//   notApplicable — the source has no such concept (see codex.js)
+// sidechains + history are 'unavailable' (not notApplicable): Claude has subagents
+// and a history.jsonl, but 1A reads neither yet (1B, ADR-0012). The endpoint 400s an
+// explicit request for them (ADR-0014) so history=on can't yield an empty -history.md.
+export const exportCapabilities = {
+  tools: 'supported',
+  toolResults: 'supported',
+  thinking: 'supported',
+  sidechains: 'unavailable',
+  history: 'unavailable',
+  verbatim: 'supported',
+  raw: 'supported',
+  embedImages: 'supported',
+};
+
 function decodeProjectDir(name) {
   return name.replace(/^-/, '/').replace(/-/g, '/');
 }

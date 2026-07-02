@@ -22,8 +22,8 @@
 
 import { execFileSync } from 'node:child_process';
 import os from 'node:os';
-import { collectEvents } from '../server/sources/index.js';
-import { renderMarkdown } from '../server/export.js';
+import { collectEvents, exportCapabilities } from '../server/sources/index.js';
+import { renderMarkdown, sourceEffectiveOptions } from '../server/export.js';
 
 const PY = process.env.EXTRACT_PY
   || `${os.homedir()}/projects/claude-session-tools/plugins/session-tools/scripts/extract-session.py`;
@@ -60,18 +60,19 @@ function optsToPyFlags(o) {
   return f;
 }
 
-// Mirror /api/export's opts resolution EXACTLY (vite.config.js). If you change
-// the endpoint's resolution, change it here too.
+// Use the endpoint's SOURCE-EFFECTIVE stage verbatim (export.js sourceEffectiveOptions:
+// full-expand + history auto→off by capability) so this harness can't drift from
+// /api/export. It intentionally SKIPS the capability-rejection gate — /replay has no
+// HTTP gate, so the renderer legitimately handles combos (e.g. verbatim+full on Codex)
+// that the endpoint 400s; those remain valid low-level renderer-parity cases.
 function resolveOpts(source, combo) {
-  const o = {
+  const requested = {
     maxChars: 400, history: 'auto',
     full: false, tools: false, toolResults: false, thinking: false,
     sidechains: false, verbatim: false, raw: false, embedImages: false,
     ...combo,
   };
-  if (source === 'codex') o.history = 'off';
-  if (o.full) o.tools = o.toolResults = o.thinking = o.sidechains = true;
-  return o;
+  return sourceEffectiveOptions(requested, exportCapabilities(source) || {});
 }
 
 function firstDiff(a, b) {
@@ -97,8 +98,8 @@ for (const ref of refs) {
   for (const { label, opts: combo } of MATRIX) {
     const py = execFileSync('python3', [PY, ref, ...optsToPyFlags(combo)], { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 });
     const o = resolveOpts(source, combo);
-    const { meta, events } = await collectEvents(source, ref, o);
-    const js = renderMarkdown(events, meta, o);
+    const { meta, events, resolvedOpts } = await collectEvents(source, ref, o);
+    const js = renderMarkdown(events, meta, resolvedOpts || o); // mirror endpoint's final opts
     const ok = py === js;
     if (!ok) failures++;
     console.log(`  [${label.padEnd(20)}] ${ok ? '✓ identical' : '✗ DIFFERS'}`);

@@ -12,6 +12,23 @@ const ROOT = path.join(HOME, '.codex', 'sessions');
 const INDEX = path.join(HOME, '.codex', 'session_index.jsonl');
 export const source = 'codex';
 
+// Phase-accurate export capabilities (ADR-0013). 'notApplicable' (not 'unavailable')
+// because these are Claude concepts Codex simply lacks: no subagents, no
+// history.jsonl, no harness/meta tags to preserve verbatim, and the collector emits
+// no image blocks (attachments fold into a "[N image(s) attached]" text note, and
+// rollouts carry local paths, not inlineable base64) so --embed-images has nothing to
+// act on. Revisit embedImages to 'supported' only if a rollout ever emits image bytes.
+export const exportCapabilities = {
+  tools: 'supported',
+  toolResults: 'supported',
+  thinking: 'supported',        // reasoning; '' → "[encrypted by Codex]"
+  sidechains: 'notApplicable',
+  history: 'notApplicable',
+  verbatim: 'notApplicable',
+  raw: 'supported',
+  embedImages: 'notApplicable',
+};
+
 function walkRollouts(dir, acc) {
   let ents = [];
   try { ents = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }

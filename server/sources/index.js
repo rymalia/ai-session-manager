@@ -55,6 +55,14 @@ const EXPORTERS = Object.fromEntries(
 
 export function exportCapableSources() { return Object.keys(EXPORTERS); }
 
+// Phase-accurate export capability map for a source (ADR-0013), or null if the
+// source is not export-capable. Object.hasOwn mirrors collectEvents' dispatch guard
+// so prototype names never resolve to an inherited property.
+export function exportCapabilities(sourceName) {
+  if (!Object.hasOwn(EXPORTERS, sourceName)) return null;
+  return EXPORTERS[sourceName].exportCapabilities || null;
+}
+
 export async function collectEvents(sourceName, ref, opts) {
   // Object.hasOwn (not `EXPORTERS[name]`) so inherited prototype names
   // (toString / constructor / __proto__) resolve to a clean 'unsupported' (→ 400)

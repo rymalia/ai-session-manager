@@ -6,11 +6,11 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { listConversations, getConversation, collectEvents, exportCapableSources, SOURCE_META } from '../server/sources/index.js';
+import { listConversations, getConversation, collectEvents, exportCapableSources, exportCapabilities, SOURCE_META } from '../server/sources/index.js';
 import { getUsage } from '../server/usage.js';
 import { openPath } from '../server/open.js';
 import { searchContent } from '../server/search.js';
-import { renderMarkdown, truncate, deriveContentDisposition, deriveFlagTokens, deriveExportFilename } from '../server/export.js';
+import { renderMarkdown, truncate, deriveContentDisposition, deriveFlagTokens, deriveExportFilename, resolveExportOptions } from '../server/export.js';
 import { parseClaudeUsage, finalizeContextUsage, createClaudeContextTracker } from '../server/contextUsage.js';
 import { apiMiddleware } from '../vite.config.js';
 
@@ -161,9 +161,10 @@ function mockRes() {
   const h = {};
   return {
     statusCode: 0,
+    body: '',
     setHeader(k, v) { h[k.toLowerCase()] = v; },
     getHeader(k) { return h[k.toLowerCase()]; },
-    end() { this.ended = true; },
+    end(b) { this.ended = true; if (b != null) this.body = String(b); },
   };
 }
 async function callApi(pathname) {
@@ -181,6 +182,96 @@ await acheck('export endpoint: unsupported source → 400 + no-store', async () 
   if (res.statusCode !== 400) throw new Error(`expected 400, got ${res.statusCode}`);
   if (res.getHeader('cache-control') !== 'no-store') throw new Error('missing Cache-Control: no-store');
 });
+
+// ---- capability metadata + option-resolution pipeline (ADR-0013 / ADR-0014) ---
+// resolveExportOptions is pure: it validates ONLY explicitly-selected options, `full`
+// is exempt and expands unconditionally, history on→validate / off→allow /
+// auto→resolve-off, and filename tokens come from the requested opts.
+const CLAUDE_CAPS = exportCapabilities('claude');
+const CODEX_CAPS = exportCapabilities('codex');
+
+check('caps: claude sidechains/history unavailable, tools supported', () =>
+  CLAUDE_CAPS.sidechains === 'unavailable' && CLAUDE_CAPS.history === 'unavailable' && CLAUDE_CAPS.tools === 'supported');
+check('caps: codex sidechains/embedImages notApplicable, raw supported', () =>
+  CODEX_CAPS.sidechains === 'notApplicable' && CODEX_CAPS.embedImages === 'notApplicable' && CODEX_CAPS.raw === 'supported');
+check('caps: non-export source has null capabilities', () => exportCapabilities('grok') === null);
+
+// full is exempt: full alone succeeds and expands all four even on Codex where
+// sidechains is notApplicable (matches /replay --full — flag on, no content).
+check('resolve: full expands four flags, no 400 (codex)', () => {
+  const r = resolveExportOptions({ full: true, history: 'auto', maxChars: 400 }, CODEX_CAPS);
+  return !r.error && r.effective.tools && r.effective.toolResults && r.effective.thinking && r.effective.sidechains
+    && r.tokens.join(',') === 'full';
+});
+// but an INDEPENDENTLY selected unsupported option still 400s, full or not.
+check('resolve: explicit sidechains=true → 400 even with full (codex)', () => {
+  const r = resolveExportOptions({ full: true, sidechains: true, history: 'auto', maxChars: 400 }, CODEX_CAPS);
+  return r.error && r.option === 'sidechains' && r.state === 'notApplicable';
+});
+check('resolve: claude history="on" → error unavailable', () => {
+  const r = resolveExportOptions({ history: 'on', maxChars: 400 }, CLAUDE_CAPS);
+  return r.error && r.option === 'history' && r.state === 'unavailable';
+});
+check('resolve: history="auto" resolves to off when unsupported', () => {
+  const r = resolveExportOptions({ history: 'auto', maxChars: 400 }, CLAUDE_CAPS);
+  return !r.error && r.effective.history === 'off';
+});
+// turning an unsupported option OFF is the safe direction — never validated.
+check('resolve: sidechains=false / history="off" never error (codex)', () => {
+  const r = resolveExportOptions({ sidechains: false, history: 'off', maxChars: 400 }, CODEX_CAPS);
+  return !r.error && r.effective.history === 'off';
+});
+// fail-closed: missing/unknown capability for an explicitly enabled option → reject.
+check('resolve: fail-closed on empty caps for enabled option', () => {
+  const r = resolveExportOptions({ tools: true, maxChars: 400 }, {});
+  return r.error && r.option === 'tools' && r.state === 'unavailable';
+});
+check('resolve: fail-closed on unknown capability value', () => {
+  const r = resolveExportOptions({ tools: true, maxChars: 400 }, { tools: 'weird' });
+  return r.error && r.option === 'tools';
+});
+check('resolve: default (no flags) succeeds with empty caps', () => {
+  const r = resolveExportOptions({ history: 'auto', maxChars: 400 }, {});
+  return !r.error && r.tokens.length === 0;
+});
+
+// /api/sources exposes the tri-value maps for export-capable sources only.
+await acheck('/api/sources exposes tri-value exportCapabilities', async () => {
+  const res = await callApi('/api/sources');
+  const body = JSON.parse(res.body);
+  if (body.claude.exportCapabilities?.sidechains !== 'unavailable') throw new Error('claude caps missing/incorrect');
+  if (body.codex.exportCapabilities?.embedImages !== 'notApplicable') throw new Error('codex caps missing/incorrect');
+  if ('exportCapabilities' in body.grok) throw new Error('non-export source should not expose capabilities');
+});
+
+// Endpoint 400s an explicitly-selected unavailable/notApplicable option, naming it.
+await acheck('export endpoint: codex sidechains=1 → 400 names the option', async () => {
+  const res = await callApi('/api/export?source=codex&ref=x&sidechains=1');
+  if (res.statusCode !== 400) throw new Error(`expected 400, got ${res.statusCode}`);
+  if (res.getHeader('cache-control') !== 'no-store') throw new Error('missing no-store');
+  const msg = JSON.parse(res.body).error;
+  if (msg !== "sidechains not applicable to source 'codex'") throw new Error(`unexpected message: ${msg}`);
+});
+await acheck('export endpoint: claude history=on → 400 names the option', async () => {
+  const res = await callApi('/api/export?source=claude&ref=x&history=on');
+  if (res.statusCode !== 400) throw new Error(`expected 400, got ${res.statusCode}`);
+  const msg = JSON.parse(res.body).error;
+  if (msg !== "history not available for source 'claude'") throw new Error(`unexpected message: ${msg}`);
+});
+
+// Happy-path THROUGH the endpoint: `full` must reach the renderer with all four flags
+// on. The parity harness expands full manually, so only an endpoint test catches a
+// mis-wired handler. Data-dependent: runs only when a real session exists.
+for (const src of ['codex', 'claude']) {
+  if (!bySource[src]?.length) continue;
+  await acheck(`export endpoint: full=1 reaches renderer with four flags (${src})`, async () => {
+    const ref = encodeURIComponent(bySource[src][0].ref);
+    const res = await callApi(`/api/export?source=${src}&ref=${ref}&full=1`);
+    if (res.statusCode !== 200) throw new Error(`expected 200, got ${res.statusCode}: ${res.body.slice(0, 120)}`);
+    if (!/- \*\*filters\*\*: tools=on, tool_results=on, thinking=on, sidechains=on\b/.test(res.body))
+      throw new Error('full did not expand to all four filters at the endpoint');
+  });
+}
 
 // ---- renderer unit tests (deterministic, synthetic blocks; no data dep) ------
 // Guards the render_event port's invariants (ADR-0010): one header per event,
