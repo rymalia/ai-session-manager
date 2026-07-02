@@ -117,6 +117,7 @@ export function projectLabel(cwd) {
 export function makeEntry({
   source, id, ref, title, cwd, gitBranch,
   userCount = 0, assistantCount = 0, messageCount, lastActivity, mtimeMs, firstUserText = '', resume,
+  contextUsage = null,
 }) {
   return {
     source,
@@ -135,6 +136,9 @@ export function makeEntry({
     mtimeMs: mtimeMs || 0,
     firstUserText: (firstUserText || '').slice(0, 200),
     resume: resume || '',
+    // Per-session context health (Claude/Codex only). null ⇒ no badge; the key
+    // is always present so the frontend can rely on it. See server/contextUsage.js.
+    contextUsage: contextUsage || null,
   };
 }
 

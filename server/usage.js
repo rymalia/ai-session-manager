@@ -11,6 +11,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
+import { parseClaudeUsage } from './contextUsage.js';
 
 const HOME = os.homedir();
 
@@ -150,10 +151,11 @@ function claudeUsage() {
         let o; try { o = JSON.parse(line); } catch { continue; }
         const u = o && o.message && o.message.usage;
         if (!u) continue;
-        input += u.input_tokens || 0;
-        output += u.output_tokens || 0;
-        cacheRead += u.cache_read_input_tokens || 0;
-        cacheCreate += u.cache_creation_input_tokens || 0;
+        const b = parseClaudeUsage(u); // shared breakdown primitive (contextUsage.js)
+        input += b.input;
+        output += b.output;
+        cacheRead += b.cacheRead;
+        cacheCreate += b.cacheCreate;
         assistantMsgs++;
       }
     }
