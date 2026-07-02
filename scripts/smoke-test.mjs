@@ -10,7 +10,7 @@ import { listConversations, getConversation, collectEvents, exportCapableSources
 import { getUsage } from '../server/usage.js';
 import { openPath } from '../server/open.js';
 import { searchContent } from '../server/search.js';
-import { renderMarkdown, truncate, deriveContentDisposition } from '../server/export.js';
+import { renderMarkdown, truncate, deriveContentDisposition, deriveFlagTokens, deriveExportFilename } from '../server/export.js';
 import { parseClaudeUsage, finalizeContextUsage, createClaudeContextTracker } from '../server/contextUsage.js';
 import { apiMiddleware } from '../vite.config.js';
 
@@ -138,6 +138,22 @@ check('content-disposition: emoji-boundary id does not throw', (() => {
 check('content-disposition: lone-surrogate id does not throw', (() => {
   try { deriveContentDisposition('12345\uD83Dx', []); return true; } catch { return false; }
 })());
+
+// Canonical download-stem parity (backs ADR-0002): flag tokens are computed from
+// requested opts BEFORE --full expands (so the token is `full`, never its four
+// components), and the stem is `replay-<short8>[-<tokens>]`. This is the filename
+// tier ADR-0002 promises; the golden body diff does not cover it.
+// maxChars: 400 is the no-token default (mirrors Python's default; a differing
+// value adds a max<n> token), so callers always pass the resolved maxChars.
+check('export filename: --full → replay-<short8>-full.md', (() => {
+  const tokens = deriveFlagTokens({ full: true, maxChars: 400 });
+  return tokens.join(',') === 'full'
+    && deriveExportFilename('c506e1c6-51cd-44f8-8afb-0123456789ab', tokens) === 'replay-c506e1c6-full.md';
+})());
+check('export filename: default (no flags) → replay-<short8>.md', () =>
+  deriveExportFilename('c506e1c6-51cd-44f8', deriveFlagTokens({ maxChars: 400 })) === 'replay-c506e1c6.md');
+check('export filename: token order is canonical, not request order', () =>
+  deriveFlagTokens({ raw: true, tools: true, thinking: true, maxChars: 400 }).join(',') === 'raw,tools,thinking');
 
 // Endpoint-level: drive apiMiddleware with a mock req/res (no socket) and assert
 // Cache-Control: no-store on every export exit, including 4xx error paths.
