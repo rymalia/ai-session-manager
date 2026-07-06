@@ -625,7 +625,7 @@ export default function App() {
             </button>
             <button
               className={`chip ${source === 'all' ? 'active' : ''}`}
-              onClick={() => { setSource('all'); setProject('all'); }}
+              onClick={() => setSource('all')}
             >
               All <span className="chip-n">{convos.length}</span>
             </button>
