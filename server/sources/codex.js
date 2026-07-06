@@ -56,7 +56,7 @@ async function readSession(file, { wantMessages = false, lastN = 30 } = {}) {
     input: fs.createReadStream(file, { encoding: 'utf-8' }),
     crlfDelay: Infinity,
   });
-  let id = null, cwd = null, gitBranch = null, lastTs = null, firstUserText = '';
+  let id = null, cwd = null, gitBranch = null, firstTs = null, lastTs = null, firstUserText = '';
   let userCount = 0, assistantCount = 0;
   // Context health: model comes from session_meta / turn_context (latest wins);
   // used/window come from the LAST token_count event (last_token_usage is the
@@ -67,7 +67,7 @@ async function readSession(file, { wantMessages = false, lastN = 30 } = {}) {
   for await (const line of rl) {
     const t = line.trim(); if (!t) continue;
     let o; try { o = JSON.parse(t); } catch { continue; }
-    if (o.timestamp) lastTs = o.timestamp;
+    if (o.timestamp) { if (!firstTs) firstTs = o.timestamp; lastTs = o.timestamp; }
     const p = o.payload || {};
 
     if (o.type === 'session_meta') {
@@ -124,7 +124,7 @@ async function readSession(file, { wantMessages = false, lastN = 30 } = {}) {
       })
     : null;
   return {
-    summary: { id, cwd, gitBranch, lastTs, firstUserText, userCount, assistantCount, contextUsage },
+    summary: { id, cwd, gitBranch, firstTs, lastTs, firstUserText, userCount, assistantCount, contextUsage },
     messages: messages ? messages.slice(-lastN) : null,
   };
 }
@@ -154,6 +154,7 @@ export async function list() {
       source, id, ref: file,
       title: titles.get(id), cwd, gitBranch: summary.gitBranch,
       userCount: summary.userCount, assistantCount: summary.assistantCount,
+      firstActivity: summary.firstTs,
       lastActivity: summary.lastTs || stat.mtime.toISOString(),
       mtimeMs: stat.mtimeMs, firstUserText: summary.firstUserText,
       resume: `${cdPrefix(cwd)}codex resume ${id}`,

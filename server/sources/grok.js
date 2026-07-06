@@ -83,6 +83,7 @@ function loadSummary(dir) {
     gitBranch: raw.head_branch || null,
     model: raw.current_model_id || null,
     count: raw.num_chat_messages || raw.num_messages || 0,
+    firstActivity: raw.created_at || null,
     lastActivity: raw.last_active_at || raw.updated_at || raw.created_at || null,
   };
 }
@@ -106,6 +107,7 @@ export async function list() {
       source, id, ref: dir,
       title: s.title, cwd, gitBranch: s.gitBranch,
       messageCount: s.count,
+      firstActivity: s.firstActivity,
       lastActivity: s.lastActivity || stat.mtime.toISOString(),
       mtimeMs: stat.mtimeMs,
       resume: `${cdPrefix(cwd)}grok --resume ${id}`,
