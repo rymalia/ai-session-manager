@@ -38,9 +38,17 @@ export function truncate(s, n) {
   return head + `… [+${cps.length - n} chars]`;
 }
 
+// Deliberate divergence from the Python reference (which slices the raw UTC
+// string): render in the process's local timezone, same "YYYY-MM-DD HH:MM:SS"
+// shape. Golden diffs vs extract-session.py stay byte-identical because the
+// parity harness pins TZ=UTC (see scripts/export-parity.mjs / ADR-0018).
 export function formatTs(ts) {
   if (!ts) return '';
-  return ts.replaceAll('T', ' ').slice(0, 19);
+  const d = new Date(ts);
+  if (Number.isNaN(d.getTime())) return ts.replaceAll('T', ' ').slice(0, 19);
+  const p = (n) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ` +
+         `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
 }
 
 // pyStr(): Python str() — booleans/None differ from JS String().

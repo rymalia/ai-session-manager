@@ -78,15 +78,28 @@ export default function ExportMenu({ source, srcRef, sourceLabel, capabilities, 
   const capState = (k) => caps[k]; // undefined ⇒ fail-closed (not supported)
   const isSup = (k) => capState(k) === 'supported';
 
-  // Position the top-layer panel under the trigger (fixed coords), right-aligned
-  // and clamped to the viewport. Recomputed on open and on scroll/resize.
+  // Position the top-layer panel against the trigger (fixed coords),
+  // right-aligned and clamped to the viewport. Standard flip behavior: open
+  // below the trigger unless the panel would overflow the viewport bottom, in
+  // which case open above — falling back to whichever side has more room when
+  // it fits in neither. Recomputed on open and on scroll/resize.
   const position = useCallback(() => {
     const el = panelRef.current;
     const trg = triggerRef.current;
     if (!el || !trg) return;
     const r = trg.getBoundingClientRect();
     const w = el.offsetWidth || 300;
-    el.style.top = `${Math.round(r.bottom + 6)}px`;
+    const h = el.offsetHeight || 380;
+    const GAP = 6, MARGIN = 8;
+    const spaceBelow = window.innerHeight - r.bottom - GAP - MARGIN;
+    const spaceAbove = r.top - GAP - MARGIN;
+    let top;
+    if (h <= spaceBelow || spaceBelow >= spaceAbove) {
+      top = Math.round(r.bottom + GAP); // below (preferred)
+    } else {
+      top = Math.round(Math.max(MARGIN, r.top - GAP - h)); // flip above
+    }
+    el.style.top = `${top}px`;
     let left = Math.round(r.right - w);
     left = Math.max(8, Math.min(left, window.innerWidth - w - 8));
     el.style.left = `${left}px`;

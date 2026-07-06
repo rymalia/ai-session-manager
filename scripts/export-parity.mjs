@@ -25,6 +25,12 @@ import os from 'node:os';
 import { collectEvents, exportCapabilities } from '../server/sources/index.js';
 import { renderMarkdown, sourceEffectiveOptions } from '../server/export.js';
 
+// ASM's formatTs renders in the process's local timezone (ADR-0018), while the
+// Python reference slices the raw UTC string. Pin TZ=UTC so both sides format
+// identical wall-clock values; Node ≥13 propagates a runtime TZ change to Date,
+// and formatTs constructs Dates at call time, so setting it here is sufficient.
+process.env.TZ = 'UTC';
+
 const PY = process.env.EXTRACT_PY
   || `${os.homedir()}/projects/claude-session-tools/plugins/session-tools/scripts/extract-session.py`;
 

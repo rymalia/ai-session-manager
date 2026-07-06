@@ -392,3 +392,22 @@ Each ADR is **Decision / Why / Consequence** and carries an explicit status.
   now, so a future opaque-ref source never forces Claude's stars to re-migrate.
   The two-scheme straddle is accepted as the price of not generalizing
   prematurely.
+
+## ADR-0018 — Export timestamps render in local time; parity runs under TZ=UTC
+
+**Status:** Accepted (2026-07-06)
+
+- **Decision:** `formatTs` converts each event/header timestamp to the export
+  process's **local timezone** before rendering, keeping the reference's
+  `YYYY-MM-DD HH:MM:SS` shape. The Python extractor (`format_ts`) slices the
+  raw UTC ISO string; this is a deliberate, enumerated divergence under
+  ADR-0002/ADR-0009. Unparseable timestamps fall back to raw string slicing.
+- **Why:** Exports are read by a human in their own timezone; raw UTC
+  wall-clock values were routinely 7–8 hours "off" for the maintainer (PDT).
+- **Consequence:** Timezone presentation moves **outside** the byte-parity
+  boundary. To keep golden diffs meaningful, `scripts/export-parity.mjs` pins
+  `process.env.TZ = 'UTC'`, under which the JS output is byte-identical to the
+  Python reference (Node ≥13 propagates a runtime TZ change to `Date`). Any
+  future hermetic fixture that asserts an exact rendered timestamp must pin TZ
+  the same way. If `/replay` later localizes upstream, re-sync and drop the
+  divergence note.
