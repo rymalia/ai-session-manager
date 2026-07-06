@@ -37,6 +37,27 @@ function relativeTime(iso) {
   return new Date(iso).toLocaleDateString();
 }
 
+// Tooltip for the time badge: the session's local start–end range.
+// "Jul 2 6:03pm - 10:45pm" when it starts and ends on the same local day,
+// "Jul 2 6:03pm - Jul 3 2:14am" when it spans days. Sources that don't track a
+// start timestamp (firstActivity null) get an end-only fallback.
+function sessionRangeTitle(startIso, endIso) {
+  const end = endIso ? new Date(endIso) : null;
+  if (!end || Number.isNaN(end.getTime())) return '';
+  const day = (d) => `${d.toLocaleString(undefined, { month: 'short' })} ${d.getDate()}`;
+  const time = (d) => {
+    const h = d.getHours() % 12 || 12;
+    return `${h}:${String(d.getMinutes()).padStart(2, '0')}${d.getHours() >= 12 ? 'pm' : 'am'}`;
+  };
+  const start = startIso ? new Date(startIso) : null;
+  if (!start || Number.isNaN(start.getTime())) return `Ended ${day(end)} ${time(end)}`;
+  const sameDay = start.getFullYear() === end.getFullYear()
+    && start.getMonth() === end.getMonth() && start.getDate() === end.getDate();
+  return sameDay
+    ? `${day(start)} ${time(start)} - ${time(end)}`
+    : `${day(start)} ${time(start)} - ${day(end)} ${time(end)}`;
+}
+
 function CopyButton({ text, label = 'Copy resume command' }) {
   const [copied, setCopied] = useState(false);
   const onClick = async (e) => {
@@ -269,7 +290,10 @@ const ConversationCard = memo(function ConversationCard({
             {convo.gitBranch && <span className="badge branch">⎇ {convo.gitBranch}</span>}
             <ContextBadge cu={convo.contextUsage} />
             <span className="badge">{convo.messageCount} msgs</span>
-            <span className="badge time">{relativeTime(convo.lastActivity)}</span>
+            {/* relative to lastActivity — i.e. time since the session's END */}
+            <span className="badge time" title={sessionRangeTitle(convo.firstActivity, convo.lastActivity)}>
+              {relativeTime(convo.lastActivity)}
+            </span>
           </div>
           <div className="card-path">{highlight(convo.projectPath, query)}</div>
           {snippet && (
@@ -499,14 +523,20 @@ export default function App() {
   );
 
   // Projects, scoped to the active source so the dropdown stays relevant.
+  // Ordered by most recent activity (newest conversation in the project).
   const projects = useMemo(() => {
     if (!convos) return [];
-    const counts = new Map();
+    const agg = new Map(); // label -> { n, latest }
     for (const c of convos) {
       if (source !== 'all' && c.source !== source) continue;
-      counts.set(c.projectLabel, (counts.get(c.projectLabel) || 0) + 1);
+      const a = agg.get(c.projectLabel) || { n: 0, latest: 0 };
+      a.n += 1;
+      if (c.mtimeMs > a.latest) a.latest = c.mtimeMs;
+      agg.set(c.projectLabel, a);
     }
-    return [...counts.entries()].sort((a, b) => b[1] - a[1]);
+    return [...agg.entries()]
+      .sort((a, b) => b[1].latest - a[1].latest)
+      .map(([name, a]) => [name, a.n]);
   }, [convos, source]);
 
   const filtered = useMemo(() => {
@@ -602,7 +632,8 @@ export default function App() {
                   key={s}
                   className={`chip ${source === s ? 'active' : ''}`}
                   style={source === s ? { borderColor: m.color, color: m.color } : undefined}
-                  onClick={() => { setSource(s); setProject('all'); }}
+                  // Toggle: clicking the active source chip deselects back to All.
+                  onClick={() => { setSource(source === s ? 'all' : s); setProject('all'); }}
                 >
                   <span className="dot" style={{ background: m.color }} />
                   {m.short} <span className="chip-n">{n}</span>

@@ -69,7 +69,7 @@ async function readSession(file, { wantMessages = false, lastN = 30 } = {}) {
     input: fs.createReadStream(file, { encoding: 'utf-8' }),
     crlfDelay: Infinity,
   });
-  let title = null, firstUserText = '', cwd = null, gitBranch = null, lastTs = null;
+  let title = null, firstUserText = '', cwd = null, gitBranch = null, firstTs = null, lastTs = null;
   let userCount = 0, assistantCount = 0;
   const messages = wantMessages ? [] : null;
   const ctx = createClaudeContextTracker();
@@ -82,7 +82,7 @@ async function readSession(file, { wantMessages = false, lastN = 30 } = {}) {
     if (o.type === 'ai-title' && o.aiTitle) { title = o.aiTitle; continue; }
     if (o.cwd) cwd = o.cwd;
     if (o.gitBranch) gitBranch = o.gitBranch;
-    if (o.timestamp) lastTs = o.timestamp;
+    if (o.timestamp) { if (!firstTs) firstTs = o.timestamp; lastTs = o.timestamp; }
 
     if (o.type === 'user' && o.message) {
       const role = classifyUser(o.message.content);
@@ -96,7 +96,7 @@ async function readSession(file, { wantMessages = false, lastN = 30 } = {}) {
     }
   }
   return {
-    summary: { title, firstUserText, cwd, gitBranch, lastTs, userCount, assistantCount, contextUsage: ctx.finalize() },
+    summary: { title, firstUserText, cwd, gitBranch, firstTs, lastTs, userCount, assistantCount, contextUsage: ctx.finalize() },
     messages: messages ? messages.slice(-lastN) : null,
   };
 }
@@ -132,6 +132,7 @@ export async function list() {
         source, id, ref: file,
         title: summary.title, cwd, gitBranch: summary.gitBranch,
         userCount: summary.userCount, assistantCount: summary.assistantCount,
+        firstActivity: summary.firstTs,
         lastActivity: summary.lastTs || stat.mtime.toISOString(),
         mtimeMs: stat.mtimeMs, firstUserText: summary.firstUserText,
         resume: `${cdPrefix(cwd)}claude --resume ${id}`,

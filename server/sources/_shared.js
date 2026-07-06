@@ -116,7 +116,7 @@ export function projectLabel(cwd) {
 // API contract stays identical across sources.
 export function makeEntry({
   source, id, ref, title, cwd, gitBranch,
-  userCount = 0, assistantCount = 0, messageCount, lastActivity, mtimeMs, firstUserText = '', resume,
+  userCount = 0, assistantCount = 0, messageCount, firstActivity, lastActivity, mtimeMs, firstUserText = '', resume,
   contextUsage = null,
 }) {
   return {
@@ -132,6 +132,10 @@ export function makeEntry({
     projectPath: cwd || '',
     gitBranch: gitBranch || null,
     messageCount: messageCount != null ? messageCount : userCount + assistantCount,
+    // Session time range: firstActivity is the first message timestamp (start),
+    // lastActivity the newest (end). Adapters that can't cheaply know the start
+    // leave firstActivity null; the UI then shows only the end time.
+    firstActivity: firstActivity || null,
     lastActivity: lastActivity || null,
     mtimeMs: mtimeMs || 0,
     firstUserText: (firstUserText || '').slice(0, 200),
