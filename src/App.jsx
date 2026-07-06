@@ -116,12 +116,12 @@ function ContextBadge({ cu }) {
     : percentLeft >= 20 ? 'warn'
     : 'low';
 
-  // Tooltip: raw values, model, basis line, timestamp, and the Claude caveat.
+  // Tooltip: raw values, model, basis line, timestamp, compaction note.
   const basisLine = basis === 'reported'
     ? 'Reported by Codex'
-    : windowBasis === 'observed-1m'
-      ? 'Estimated — 1M window inferred from this session’s history'
-      : 'Estimated — Claude stores no window; assumed 200k';
+    : windowBasis === 'observed-1m' || windowBasis === 'assumed-1m'
+      ? 'Estimated — 1M window'
+      : 'Estimated — 200k window (Haiku or pre-Mar 2026 session)';
   const lines = [
     windowTokens
       ? `${usedTokens.toLocaleString()} / ${windowTokens.toLocaleString()} tokens`
@@ -129,7 +129,6 @@ function ContextBadge({ cu }) {
     model ? `model: ${model}` : null,
     basisLine,
     measuredAt ? `last recorded ${new Date(measuredAt).toLocaleString()}` : null,
-    estimated ? 'Not Claude Code’s configurable auto-compaction threshold.' : null,
     estimated && compactions > 0
       ? `Compacted ${compactions}× — context shown is since the last compaction.`
       : null,
@@ -501,10 +500,15 @@ export default function App() {
       if (c.mtimeMs > a.latest) a.latest = c.mtimeMs;
       agg.set(c.projectLabel, a);
     }
-    return [...agg.entries()]
+    const out = [...agg.entries()]
       .sort((a, b) => b[1].latest - a[1].latest)
       .map(([name, a]) => [name, a.n]);
-  }, [convos, source]);
+    // Source chips preserve the project selection, so the selected project may
+    // have no sessions in the active source — keep it listed (with 0) so the
+    // select never renders a blank value.
+    if (project !== 'all' && !agg.has(project)) out.push([project, 0]);
+    return out;
+  }, [convos, source, project]);
 
   const filtered = useMemo(() => {
     if (!convos) return [];
@@ -600,7 +604,8 @@ export default function App() {
                   className={`chip ${source === s ? 'active' : ''}`}
                   style={source === s ? { borderColor: m.color, color: m.color } : undefined}
                   // Toggle: clicking the active source chip deselects back to All.
-                  onClick={() => { setSource(source === s ? 'all' : s); setProject('all'); }}
+                  // Source chips never touch the project filter.
+                  onClick={() => setSource(source === s ? 'all' : s)}
                 >
                   <span className="dot" style={{ background: m.color }} />
                   {m.short} <span className="chip-n">{n}</span>

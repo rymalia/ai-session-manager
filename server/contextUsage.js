@@ -7,10 +7,12 @@
 // server/sources/claude.js (per-session badge) import from HERE — the adapter
 // must never import server/usage.js, which eagerly loads DatabaseSync.
 
-const ASSUMED_WINDOW = 200_000; // conservative floor when the window is unknown.
-                                // Raise if a 1M Claude Code default is ever
-                                // confirmed for these models.
+const FLOOR_200K = 200_000; // pre-2026-03-14 default, and still Haiku's window.
 const ONE_M = 1_000_000;
+// Claude Code's default context window became 1M on 2026-03-14 for every model
+// except Haiku (Opus, Sonnet, Fable). Sessions whose last activity predates the
+// cutover keep the old 200k assumption. See docs/adr-context-health-2026-07-06.md.
+const ONE_M_DEFAULT_SINCE = '2026-03-14';
 
 const clamp = (x, lo, hi) => Math.min(hi, Math.max(lo, x));
 const int = (v) => (Number.isFinite(v) && v > 0 ? Math.floor(v) : 0);
@@ -104,14 +106,20 @@ export function createClaudeContextTracker() {
 
     finalize() {
       if (!latest) return null;
-      // Denominator inferred from the session's own token history: a peak input
-      // side above the floor PROVES a >200k (1M) window ran at that point;
-      // otherwise assume the conservative 200k floor.
-      const observed1m = peakInputSide > ASSUMED_WINDOW;
+      // Denominator precedence: (1) a peak input side above 200k PROVES a 1M
+      // window ran at some point (any model, any date); (2) otherwise the model
+      // default applies — 1M for non-Haiku sessions on/after the 2026-03-14
+      // cutover, 200k for Haiku or pre-cutover sessions. measuredAt is a
+      // Z-suffixed ISO string, so lexicographic comparison is date order; a
+      // missing timestamp is treated as current (post-cutover).
+      const observed1m = peakInputSide > FLOOR_200K;
+      const isHaiku = /haiku/i.test(latest.model || '');
+      const defaults1m = !isHaiku
+        && (latest.measuredAt == null || latest.measuredAt >= ONE_M_DEFAULT_SINCE);
       return finalizeContextUsage({
         usedTokens: latest.usedTokens,
-        windowTokens: observed1m ? ONE_M : ASSUMED_WINDOW,
-        windowBasis: observed1m ? 'observed-1m' : 'assumed-200k',
+        windowTokens: observed1m || defaults1m ? ONE_M : FLOOR_200K,
+        windowBasis: observed1m ? 'observed-1m' : defaults1m ? 'assumed-1m' : 'assumed-200k',
         model: latest.model,
         measuredAt: latest.measuredAt,
         basis: 'estimated',

@@ -108,10 +108,29 @@ check('ctx: codex 81872/353400 → 77% reported', (() => {
   return c && c.percentLeft === 77 && c.basis === 'reported' && c.windowBasis === 'recorded';
 })());
 
-// Claude 200k assumed: total 150,000, peak ≤ 200k → 25% left, assumed-200k.
-check('ctx: claude 150k/200k → 25% assumed-200k', (() => {
+// Claude 1M default (post-2026-03-14, non-Haiku; no timestamp ⇒ treated as
+// current): total 150,000 → 85% left, assumed-1m.
+check('ctx: claude 150k/1M → 85% assumed-1m', (() => {
   const c = runTracker([asst({ input_tokens: 100000, cache_read_input_tokens: 40000, cache_creation_input_tokens: 5000, output_tokens: 5000 })]);
-  return c && c.usedTokens === 150000 && c.percentLeft === 25 && c.windowBasis === 'assumed-200k' && c.basis === 'estimated';
+  return c && c.usedTokens === 150000 && c.percentLeft === 85 && c.windowBasis === 'assumed-1m' && c.basis === 'estimated';
+})());
+
+// Haiku keeps the 200k window regardless of date.
+check('ctx: haiku 150k/200k → 25% assumed-200k', (() => {
+  const c = runTracker([{ type: 'assistant', message: { model: 'claude-haiku-4-5-20251001', usage: { input_tokens: 145000, output_tokens: 5000 } } }]);
+  return c && c.usedTokens === 150000 && c.percentLeft === 25 && c.windowBasis === 'assumed-200k';
+})());
+
+// Sessions ending before the 2026-03-14 cutover keep the old 200k default.
+check('ctx: pre-cutover session → assumed-200k', (() => {
+  const c = runTracker([asst({ input_tokens: 150000, output_tokens: 0 }, { timestamp: '2026-02-01T12:00:00.000Z' })]);
+  return c && c.windowBasis === 'assumed-200k' && c.windowTokens === 200000;
+})());
+
+// Sessions on/after the cutover get the 1M default.
+check('ctx: post-cutover session → assumed-1m', (() => {
+  const c = runTracker([asst({ input_tokens: 150000, output_tokens: 0 }, { timestamp: '2026-03-14T00:00:00.000Z' })]);
+  return c && c.windowBasis === 'assumed-1m' && c.windowTokens === 1000000;
 })());
 
 // Claude 1M observed: a peak input side > 200k proves the 1M window.
@@ -157,7 +176,7 @@ check('ctx: sidechain never selected', (() => {
     asst({ input_tokens: 70000, output_tokens: 0 }),
     asst({ input_tokens: 900000, output_tokens: 0 }, { isSidechain: true }),
   ]);
-  return c && c.usedTokens === 70000 && c.windowBasis === 'assumed-200k'; // sidechain peak ignored too
+  return c && c.usedTokens === 70000 && c.windowBasis === 'assumed-1m'; // sidechain peak ignored (else observed-1m)
 })());
 
 // No valid message anywhere → null (only genuine null case).
@@ -224,7 +243,7 @@ for (const c of all) {
     && (cu.windowTokens == null || (Number.isInteger(cu.windowTokens) && cu.windowTokens > 0))
     && (cu.percentLeft == null || (Number.isInteger(cu.percentLeft) && cu.percentLeft >= 0 && cu.percentLeft <= 100))
     && (cu.basis === 'reported' || cu.basis === 'estimated')
-    && ['recorded', 'assumed-200k', 'observed-1m', null].includes(cu.windowBasis)
+    && ['recorded', 'assumed-200k', 'assumed-1m', 'observed-1m', null].includes(cu.windowBasis)
     && Number.isInteger(cu.compactions) && cu.compactions >= 0
     && (cu.measuredAt == null || !Number.isNaN(Date.parse(cu.measuredAt)))
     && (c.source === 'claude' || c.source === 'codex'); // only these two emit it
