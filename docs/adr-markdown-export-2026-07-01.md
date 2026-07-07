@@ -141,9 +141,12 @@ Each ADR is **Decision / Why / Consequence** and carries an explicit status.
   intentional replay behavior:
   1. **Upstream quirk preserved:** fence/inline-code breakage when tool output or
      summaries contain backticks. ASM must follow `/replay` until upstream changes.
-  2. **Port gap to fix:** structured dict/list values must match Python
-     `json.dumps(..., ensure_ascii=True)`; literal non-ASCII from `JSON.stringify`
-     is not an accepted exception.
+  2. **Port gap to fix (FIXED 2026-07-07):** structured dict/list values must
+     match Python `json.dumps(..., ensure_ascii=True)`; literal non-ASCII from
+     `JSON.stringify` is not an accepted exception. Closed by `jsonAscii` in
+     `server/export.js` (per-code-unit `\uXXXX` escaping, byte-verified against
+     CPython), with a hermetic fixture and a golden-diffed non-ASCII
+     structured-input case.
   3. **Accepted, tested exception unless later fixed:** `pyRepr` may keep exotic
      non-printable Unicode literal where CPython emits `\x/\u/\U` escapes.
   4. **Accepted, tested exception unless source order is preserved earlier:** V8
@@ -158,6 +161,14 @@ Each ADR is **Decision / Why / Consequence** and carries an explicit status.
      change **which** three keys appear, not merely their order (insertion
      `{a, b, "9", "1"}` → Python `[a, b, 9]` vs V8 `[1, 9, a]` — a different set).
      Both surfaces require a deterministic fixture.
+  5. **Accepted, structurally unfixable exception (added 2026-07-07):** float
+     formatting in structured tool-input values. Python re-serializes what the
+     JSON parser preserved (`1.0` → `"1.0"`, `1e-07` → `"1e-07"`, `-0.0` →
+     `"-0.0"`), while `JSON.parse` collapses `1.0` to the double `1` before the
+     serializer runs, so V8 emits `1`, `1e-7`, `0`. Unlike items 2–4 this is not
+     a porting choice: reproducing Python would require a custom lossless JSON
+     parser. Pinned by a hermetic fixture asserting the JS output; golden
+     fixtures must avoid non-integer numerics in structured tool inputs.
 - **Why:** ADR-0002 remains meaningful only when upstream quirks, implementation
   bugs, and consciously accepted exceptions are distinct.
 - **Consequence:** Remove the obsolete `pyStr` bool/None exception; it is handled.

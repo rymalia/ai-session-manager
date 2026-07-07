@@ -10,14 +10,19 @@ import { listConversations, getConversation, collectEvents, exportCapableSources
 import { getUsage } from '../server/usage.js';
 import { openPath } from '../server/open.js';
 import { searchContent } from '../server/search.js';
-import { renderMarkdown, truncate, deriveContentDisposition, deriveFlagTokens, deriveExportFilename, resolveExportOptions } from '../server/export.js';
+import { renderMarkdown, truncate, deriveContentDisposition, deriveFlagTokens, deriveExportFilename, resolveExportOptions, summarizeToolUse, pyRepr } from '../server/export.js';
 import { parseClaudeUsage, finalizeContextUsage, createClaudeContextTracker } from '../server/contextUsage.js';
 import { apiMiddleware } from '../vite.config.js';
 import { normalizeExportOpts, buildExportQuery, clampMaxChars, DEFAULT_EXPORT_OPTS } from '../src/exportOptions.js';
 
 let pass = 0;
 const fails = [];
-const check = (name, cond) => { cond ? pass++ : fails.push(name); };
+// A function `cond` is INVOKED — passing `() => expr` without invoking it here
+// used to make the check vacuously pass (a function object is always truthy).
+const check = (name, cond) => {
+  try { (typeof cond === 'function' ? cond() : cond) ? pass++ : fails.push(name); }
+  catch (e) { fails.push(`${name}: threw ${e.message}`); }
+};
 const acheck = async (name, fn) => { try { await fn(); pass++; } catch (e) { fails.push(`${name}: ${e.message}`); } };
 
 const t0 = Date.now();
@@ -155,6 +160,9 @@ check('export filename: default (no flags) → replay-<short8>.md', () =>
   deriveExportFilename('c506e1c6-51cd-44f8', deriveFlagTokens({ maxChars: 400 })) === 'replay-c506e1c6.md');
 check('export filename: token order is canonical, not request order', () =>
   deriveFlagTokens({ raw: true, tools: true, thinking: true, maxChars: 400 }).join(',') === 'raw,tools,thinking');
+check('export filename: clamp-boundary maxChars → max1 / max20000', () =>
+  deriveFlagTokens({ maxChars: 1 }).join(',') === 'max1'
+  && deriveFlagTokens({ maxChars: 20000 }).join(',') === 'max20000');
 
 // Endpoint-level: drive apiMiddleware with a mock req/res (no socket) and assert
 // Cache-Control: no-store on every export exit, including 4xx error paths.
@@ -274,6 +282,31 @@ for (const src of ['codex', 'claude']) {
   });
 }
 
+// maxChars clamp [1,20000] through the real endpoint (ADR-0011's documented
+// deviation from unbounded /replay), pinned by body equivalence against the
+// in-range value each out-of-range/malformed input must clamp/fall back to.
+// parseInt semantics: '12abc' truncates to 12; 'abc' is NaN → default 400.
+if (bySource.claude?.length) {
+  const ref = encodeURIComponent(bySource.claude[0].ref);
+  const getBody = async (params) => {
+    const res = await callApi(`/api/export?source=claude&ref=${ref}${params}`);
+    if (res.statusCode !== 200) throw new Error(`expected 200, got ${res.statusCode}: ${res.body.slice(0, 120)}`);
+    return res.body;
+  };
+  await acheck('export endpoint: maxChars clamps to [1,20000] (ADR-0011)', async () => {
+    if (await getBody('&maxChars=0') !== await getBody('&maxChars=1')) throw new Error('0 should clamp to 1');
+    if (await getBody('&maxChars=99999') !== await getBody('&maxChars=20000')) throw new Error('99999 should clamp to 20000');
+    if (await getBody('&maxChars=abc') !== await getBody('')) throw new Error('non-numeric should fall back to default 400');
+    if (await getBody('&maxChars=12abc') !== await getBody('&maxChars=12')) throw new Error('parseInt should truncate 12abc to 12');
+  });
+  await acheck('export endpoint: Content-Disposition carries the CLAMPED max token', async () => {
+    const res = await callApi(`/api/export?source=claude&ref=${ref}&maxChars=0&download=1`);
+    if (res.statusCode !== 200) throw new Error(`expected 200, got ${res.statusCode}`);
+    const cd = res.getHeader('content-disposition') || '';
+    if (!cd.includes('max1')) throw new Error(`expected a max1 token in: ${cd}`);
+  });
+}
+
 // ---- renderer unit tests (deterministic, synthetic blocks; no data dep) ------
 // Guards the render_event port's invariants (ADR-0010): one header per event,
 // turn counting, code-point-accurate truncation, the encrypted-reasoning
@@ -327,6 +360,50 @@ await acheck('render: empty reasoning shows encrypted placeholder', async () => 
   if (!md.includes('> _reasoning:_ [encrypted by Codex]')) throw new Error('missing encrypted placeholder');
 });
 
+// ---- ADR-0009 enumerated exceptions + the item-2 fix (items D+E) -----------
+// Every accepted parity exception gets a deterministic fixture pinning the JS
+// behavior; the ensure_ascii fix gets an exact-output check. Non-ASCII inputs
+// are built from code points so this file stays free of invisible characters.
+const CP = (...cps) => String.fromCodePoint(...cps);
+
+// ADR-0009 #2 (FIXED): structured values escape non-ASCII exactly like Python
+// json.dumps ensure_ascii — lowercase \uXXXX, astral chars as surrogate halves.
+// pyRepr then doubles the backslashes, hence \\u in the expected literal.
+check('summarize: ensure_ascii escapes in structured values (ADR-0009 #2)',
+  summarizeToolUse('Task', { input: { msg: `caf${CP(0xe9)} ${CP(0x1f600)}` } })
+    === `Task(input='{"msg":"caf\\\\u00e9 \\\\ud83d\\\\ude00"}')`);
+
+// ADR-0009 #4, surface 1: V8 promotes integer-like keys ascending, so the
+// .slice(0,3) fallback keeps a different key SET than Python (which preserves
+// insertion order: 'T(a=…, b=…, 9=…)').
+check('summarize: V8 integer-key promotion changes fallback key set (ADR-0009 #4)',
+  summarizeToolUse('T', JSON.parse('{"a":1,"b":2,"9":3,"1":4}')) === 'T(1=…, 9=…, a=…)');
+
+// ADR-0009 #4, surface 2: same canonicalization inside a structured value
+// under a priority key (Python keeps '{"2": "x", "0": "y"}' insertion order).
+check('summarize: V8 integer-key order in structured values (ADR-0009 #4)',
+  summarizeToolUse('T', { input: JSON.parse('{"2":"x","0":"y"}') }) === `T(input='{"0":"y","2":"x"}')`);
+
+// ADR-0009 #5: JSON.parse collapses 1.0 → 1 / -0.0 → -0 before the serializer
+// runs, so Python's '{"a":1.0,"b":1e-07,"c":-0.0}' is unreproducible by design.
+check('summarize: float-ness lost at JSON.parse (ADR-0009 #5)',
+  summarizeToolUse('T', { input: JSON.parse('{"a":1.0,"b":1e-7,"c":-0.0}') }) === `T(input='{"a":1,"b":1e-7,"c":0}')`);
+
+// ADR-0009 #3: pyRepr keeps exotic non-printable Unicode literal where
+// CPython's !r would emit \u200b.
+check('pyRepr: exotic Unicode kept literal (ADR-0009 #3)',
+  pyRepr(`a${CP(0x200b)}b`) === `'a${CP(0x200b)}b'`);
+
+// maxChars boundary through the renderer: exactly N code points stays intact,
+// N+1 gains the '… [+1 chars]' marker (ts:'' keeps output TZ-independent).
+await acheck('render: maxChars boundary on tool_result (N intact, N+1 marked)', async () => {
+  const evs = (txt) => [{ role: 'user', ts: '', source: 'main', blocks: [{ kind: 'tool_result', text: txt }] }];
+  const at = renderMarkdown(evs('x'.repeat(80)), META, { toolResults: true, maxChars: 80 });
+  const over = renderMarkdown(evs('y'.repeat(81)), META, { toolResults: true, maxChars: 80 });
+  if (!at.includes('x'.repeat(80)) || at.includes('chars]')) throw new Error('N code points must not truncate');
+  if (!over.includes('y'.repeat(80) + '… [+1 chars]')) throw new Error('N+1 must truncate with a +1 marker');
+});
+
 // (6) Codex user_message mirrors Python's `images or local_images`: an empty
 // images array falls through to local_images. Stage the checked-in fixture
 // under an isolated HOME so the real adapter path guard remains exercised.
@@ -364,14 +441,15 @@ await acheck('codex export: empty images falls back to local_images', async () =
 // ROOT from os.homedir() at import time — mutating HOME in this process
 // cannot re-point the containment root.
 const CLAUDE_IDX_SESSION = 'c1a0de00-1111-4222-8333-444455556666';
-const stageClaudeProject = (tempHome, slug, { index } = {}) => {
+const stageClaudeProject = (tempHome, slug, {
+  index,
+  fixture = './fixtures/claude-index-enrichment.jsonl',
+  sessionId = CLAUDE_IDX_SESSION,
+} = {}) => {
   const proj = path.join(tempHome, '.claude', 'projects', slug);
   fs.mkdirSync(proj, { recursive: true });
-  const staged = path.join(proj, `${CLAUDE_IDX_SESSION}.jsonl`);
-  fs.copyFileSync(
-    fileURLToPath(new URL('./fixtures/claude-index-enrichment.jsonl', import.meta.url)),
-    staged,
-  );
+  const staged = path.join(proj, `${sessionId}.jsonl`);
+  fs.copyFileSync(fileURLToPath(new URL(fixture, import.meta.url)), staged);
   if (index !== undefined) fs.writeFileSync(path.join(proj, 'sessions-index.json'), index);
   return staged;
 };
@@ -472,6 +550,38 @@ await acheck('claude export: index enrichment variants (match/none/no-match/inva
     }));
     if (falsey.messageCount !== 0) throw new Error('falsey fields should still populate meta');
     assertNoIndexLines(falsey, 'falsey fields');
+  } finally {
+    fs.rmSync(tempHome, { recursive: true, force: true });
+  }
+});
+
+// (6d) Render-edges fixture (item D): non-ASCII body text + ensure_ascii
+// structured tool input (ADR-0009 item 2 fix, golden-proven against real
+// json.dumps), a base64 image (hermetic embed-images coverage), equal and
+// missing timestamps, noise/command-name tags (cleanUserText vs verbatim), and
+// an 80/81-code-point tool_result pair hitting the full+max80 matrix boundary.
+// Deliberately NO integer-like keys and NO floats — ADR-0009 items 4/5 diverge
+// by design and are pinned by the hermetic checks above instead.
+await acheck('claude export: render-edges golden diff (unicode/image/ts/boundary)', async () => {
+  const tempHome = fs.mkdtempSync(path.join(os.tmpdir(), 'asm-claude-edges-'));
+  try {
+    const staged = stageClaudeProject(tempHome, '-Users-test-edges', {
+      fixture: './fixtures/claude-render-edges.jsonl',
+      sessionId: 'edce5000-1111-4222-8333-444455556666',
+    });
+    execFileSync(
+      process.execPath,
+      [fileURLToPath(new URL('./export-parity.mjs', import.meta.url)), 'claude', staged],
+      {
+        env: {
+          ...process.env,
+          HOME: tempHome,
+          EXTRACT_PY: process.env.EXTRACT_PY
+            || path.join(os.homedir(), 'projects', 'claude-session-tools', 'plugins', 'session-tools', 'scripts', 'extract-session.py'),
+        },
+        encoding: 'utf8',
+      },
+    );
   } finally {
     fs.rmSync(tempHome, { recursive: true, force: true });
   }

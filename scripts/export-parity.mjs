@@ -48,6 +48,8 @@ const MATRIX = [
   { label: 'verbatim+full', opts: { full: true, verbatim: true } },
   { label: 'tools+thinking', opts: { tools: true, thinking: true } },
   { label: 'full+embed-images', opts: { full: true, embedImages: true } },
+  { label: 'tool-results-alone', opts: { toolResults: true } },
+  { label: 'raw+embed-images', opts: { raw: true, embedImages: true } },
 ];
 
 function optsToPyFlags(o) {

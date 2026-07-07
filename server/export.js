@@ -81,11 +81,24 @@ export function pyRepr(s) {
   return out + q;
 }
 
+// jsonAscii(): JSON.stringify + Python json.dumps's default ensure_ascii=True —
+// every UTF-16 code unit ≥ 0x80 becomes a lowercase \uXXXX escape, non-BMP as
+// two escapes (the surrogate halves), exactly like CPython. Escaping happens
+// BEFORE truncate's 100-char cap so escape sequences count toward it on both
+// sides, and the result is pure ASCII so pyRepr adds no further divergence.
+// Closes ADR-0009 item 2. (The range is built from code points, not literals,
+// so this file stays free of invisible characters.)
+const NON_ASCII = new RegExp(`[${String.fromCharCode(0x80)}-${String.fromCharCode(0xffff)}]`, 'g');
+const jsonAscii = (v) => JSON.stringify(v)
+  .replace(NON_ASCII, (ch) => '\\u' + ch.charCodeAt(0).toString(16).padStart(4, '0'));
+
 // summarize_tool_use(): priority-key picker → `name(k=v, …)` one-liner.
-// KNOWN GAP: dict/list values use JSON.stringify (matches Python's
-// separators=(',',':')) but keep Unicode literal, whereas Python json.dumps
-// defaults to ensure_ascii=True (\uXXXX). Only affects structured tool inputs
-// (rare for Codex; relevant for some Claude tools) — see ADR-0009.
+// Structured dict/list values serialize via jsonAscii (byte-matches Python
+// json.dumps(v, separators=(',',':')) — ADR-0009 item 2 fixed). REMAINING
+// ACCEPTED GAPS: V8 integer-key canonicalization (ADR-0009 item 4, both
+// surfaces below) and float formatting (ADR-0009 item 5: JSON.parse collapses
+// 1.0 → 1 before we ever see it, so Python's '1.0'/'1e-07'/'-0.0' cannot be
+// reproduced without a lossless JSON parser).
 export function summarizeToolUse(name, input) {
   const inp = input && typeof input === 'object' ? input : {};
   const priority = [
@@ -97,7 +110,7 @@ export function summarizeToolUse(name, input) {
   for (const k of priority) {
     if (Object.prototype.hasOwnProperty.call(inp, k)) {
       let v = inp[k];
-      v = v !== null && typeof v === 'object' ? JSON.stringify(v) : pyStr(v);
+      v = v !== null && typeof v === 'object' ? jsonAscii(v) : pyStr(v);
       hits.push(`${k}=${pyRepr(truncate(v, 100))}`);
     }
   }
