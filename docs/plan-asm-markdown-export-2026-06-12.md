@@ -654,8 +654,38 @@ UI shippable (items A→B below) is the highest-value path; everything else is r
   sessions, 12 combos). Plan-reviewed (REVISE → 5 findings folded: empty-folder
   fail-closed, explicit 404s, pinned signature contract, envelope precedence rules,
   endpoint-level 404 tests) + impl-reviewed (SHIP, 0 defects; 1 Info test-strength nit
-  fixed pre-commit) via `/codex-plan-review`. **Remaining: F2 (listing/search
-  integration), F3 (1B converter) — original spec below.**
+  fixed pre-commit) via `/codex-plan-review`. **Remaining: F3 (1B converter) —
+  original spec below.**
+- ✅ **F — loop F2 DONE & committed (`96a9ab3`, 2026-07-07): listing/search
+  integration.** `list()` flipped to opaque refs atomically with one card per
+  logical identity: batched `resolveProjectBundles(slug)` (same validation/
+  containment as the single path, ONE readdir + ONE cached index parse per
+  project — the `loadProjectIndexMap` cache keys on the index file's
+  mtime+size+missing/unreadable state, eviction test-pinned for rewrite AND
+  deletion) shares `assembleBundle` with `resolveBundle`. Folder-only /
+  index-only sessions gain metadata-only cards (index-derived title/counts/
+  branch/cwd, `Number.isFinite`-guarded timestamps with `fileMtime` surfacing
+  as visible ISO `lastActivity`, `resume: ''`, `contextUsage: null`,
+  `exportable: false`) — ~292 recovered sessions surfaced locally
+  (9,028→9,320 cards). Main-transcript cards keep transcript-derived display
+  fields byte-for-byte (context-health computation untouched; index never
+  consulted for them). `detail()` returns the ADR-0017 recovered metadata
+  response (`recovered: 'folder-only'|'index-only'`, `messages: []`, title
+  summary→firstPrompt fallback); `collectEvents` stays `not_found` → 404
+  until F3 (ADR-0012). Entries carry `cacheSignature`; `server/search.js`
+  invalidates on exported `entrySignature(c)` (`cacheSignature ?? mtimeMs`).
+  `ccv.starred` envelope v2 (SAME permanent `ccv.starred.v1` storage key —
+  the envelope `version` field tracks migrations) rewrites `claude:<path>.jsonl`
+  keys to `claude:v1:<slug>:<id>` exactly once; non-Claude keys untouched.
+  ADR-0017 amended with the recovered-session resolution note. Three UI
+  guards (Export menu, resume copy, expanded resume line hidden on recovered
+  cards). `isSidechain` index entries excluded at discovery only
+  (loadSessionIndex semantics unchanged for parity). Tests 127→**134/0**
+  (era-matrix list/detail child-process coverage, starred v2 rewrite matrix,
+  entrySignature, cache eviction + same-stat unreadable recovery); golden
+  parity byte-identical; build green. Plan-reviewed (REVISE → 6 findings
+  folded) + impl-reviewed (FIX → 1 Major `lastActivity` leak + 3 Minors
+  fixed across two rounds) via `/codex-plan-review`. **Remaining: F3 only.**
 - **F. 1B (§7 + ADR-0017) — the big one; gate now accepted (ADR-0012).** Canonical Claude
   `SessionBundle` identity `{source, projectSlug, sessionId}` + **opaque versioned refs
   (Claude only** — others keep path refs, a deliberate two-scheme asymmetry). Shared resolver
