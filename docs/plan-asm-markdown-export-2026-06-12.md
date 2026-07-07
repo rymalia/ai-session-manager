@@ -630,6 +630,32 @@ UI shippable (items A→B below) is the highest-value path; everything else is r
   gap to fix**; #3 (`pyRepr` exotic Unicode) + #4 (integer-key order) are **accepted, tested
   exceptions**; `pyStr` bool/None is **not** a gap (handled). Do alongside D — both add the
   same Unicode/structured-input fixtures.
+- ✅ **F — loop F1 DONE & committed (`9fed1aa`, 2026-07-07): resolver + identity contract
+  (ADR-0017), no 1B parsing.** New `server/sources/claudeBundle.js`: strict fail-closed
+  `v1:<projectSlug>:<sessionId>` ref codec (charset `[A-Za-z0-9._-]`, `.`/`..` rejected,
+  every derived path still `isInside`-checked) and `resolveBundle()` mirroring
+  `resolve_session`'s era logic — main-only / main+folder+subagents (lexical) /
+  folder-only / index-only, with the replayable-existence rule (bare empty folder →
+  null, extract-session.py:199); `loadSessionIndex` moved there; `compositeSignature`
+  (`relPath@mtimeMs:size`, sorted, `|`-joined over main+subagents+index) implemented and
+  pinned with its F2 consumer contract (entries gain `cacheSignature: string|null`;
+  `mtimeMs` stays the numeric sort key; search/list invalidate on
+  `cacheSignature ?? mtimeMs`). `claude.js` `detail`/`collectEvents` accept both ref
+  schemes via discriminated `resolveRefToMainPath` (path branch byte-unchanged;
+  opaque without a main transcript → `not_found`); `not_found` → 404 mapped on both
+  `/api/export` and `/api/conversation`. `ccv.starred` migrated once into a versioned
+  source-agnostic envelope (`ccv.starred.v1`, pure `src/starred.js`; valid envelope
+  wins, single serializer, future rewrites only when `version < target`). **`list()`
+  deliberately unchanged** — opaque emission + one-card-per-identity + the Claude
+  star-key rewrite land atomically in F2. Tests 114→**127/0** (codec, resolver era
+  matrix + signature stability/mutation across all three artifact types in child
+  processes, opaque≡path byte-equivalence for export+detail, endpoint 404s, starred
+  envelope); golden parity re-verified byte-identical (pinned Claude + both Codex
+  sessions, 12 combos). Plan-reviewed (REVISE → 5 findings folded: empty-folder
+  fail-closed, explicit 404s, pinned signature contract, envelope precedence rules,
+  endpoint-level 404 tests) + impl-reviewed (SHIP, 0 defects; 1 Info test-strength nit
+  fixed pre-commit) via `/codex-plan-review`. **Remaining: F2 (listing/search
+  integration), F3 (1B converter) — original spec below.**
 - **F. 1B (§7 + ADR-0017) — the big one; gate now accepted (ADR-0012).** Canonical Claude
   `SessionBundle` identity `{source, projectSlug, sessionId}` + **opaque versioned refs
   (Claude only** — others keep path refs, a deliberate two-scheme asymmetry). Shared resolver
