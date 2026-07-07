@@ -1,9 +1,11 @@
 // Claude Code: ~/.claude/projects/<encoded-cwd>/<sessionId>.jsonl
 // Every line is one record (user / assistant / meta).
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import readline from 'node:readline';
 import { makeEntry, cdPrefix, clip, toolUseLine, toolResultLine, thinkingLine, isInside } from './_shared.js';
+import { cleanUserText } from '../export.js';
 import { createClaudeContextTracker } from '../contextUsage.js';
 import { ROOT, encodeClaudeRef, decodeClaudeRef, resolveBundle, resolveProjectBundles, loadSessionIndex } from './claudeBundle.js';
 
@@ -11,17 +13,17 @@ export const source = 'claude';
 
 // Phase-accurate export capabilities (ADR-0013). Tri-value:
 //   supported     — honored now
-//   unavailable   — a real /replay feature this source WILL gain, not built in 1A
+//   unavailable   — a real /replay feature this source WILL gain, not built yet
 //   notApplicable — the source has no such concept (see codex.js)
-// sidechains + history are 'unavailable' (not notApplicable): Claude has subagents
-// and a history.jsonl, but 1A reads neither yet (1B, ADR-0012). The endpoint 400s an
-// explicit request for them (ADR-0014) so history=on can't yield an empty -history.md.
+// sidechains + history flipped to 'supported' in F3: the collector reads
+// subagent sidechain files and backfills ~/.claude/history.jsonl (tri-state
+// `history: auto|on|off`, resolved per-session in collectBundleEvents).
 export const exportCapabilities = {
   tools: 'supported',
   toolResults: 'supported',
   thinking: 'supported',
-  sidechains: 'unavailable',
-  history: 'unavailable',
+  sidechains: 'supported',
+  history: 'supported',
   verbatim: 'supported',
   raw: 'supported',
   embedImages: 'supported',
@@ -149,11 +151,11 @@ export async function list() {
           cacheSignature: b.compositeSignature,
         }));
       } else {
-        // Recovered session (folder-only / index-only): metadata-only card,
-        // no transcript parsing (ADR-0012 — the converter is F3). Context
-        // health needs the main transcript (ADR-0017) → null. resume '' —
-        // the CLI cleaned this session up, a resume command would be a lie.
-        // exportable:false — export 404s until the F3 converter exists.
+        // Recovered session (folder-only / index-only): metadata-only card —
+        // the card itself never parses transcripts. Context health needs the
+        // main transcript (ADR-0017) → null. resume '' — the CLI cleaned this
+        // session up, a resume command would be a lie. Export works since F3
+        // (bundle-wide collectEvents), so no exportable gate.
         const idx = b.indexMeta;
         const isFolderOnly = b.subagentPaths.length > 0;
         let mtimeMs = 0;
@@ -193,7 +195,6 @@ export async function list() {
           resume: '',
           contextUsage: null,
           cacheSignature: b.compositeSignature,
-          exportable: false,
         }));
       }
     }
@@ -204,25 +205,64 @@ export async function list() {
 // Dual-scheme ref acceptance (ADR-0017). Opaque `v1:<slug>:<id>` refs are
 // discriminated by their scheme prefix (decodeClaudeRef → null for anything
 // else — no sniffing) and resolved through the bundle resolver; every other
-// ref is the legacy absolute-path form, handled byte-for-byte as before.
-// EXPORT (collectEvents) requires a surviving MAIN transcript until the 1B
-// converter lands (F3): a recovered identity maps to 'not_found' (→ 404),
-// distinct from containment's 'forbidden' (→ 403). detail() resolves bundles
-// itself since F2 so recovered cards can expand.
-async function resolveRefToMainPath(ref) {
+// ref is the legacy absolute-path form. A recovered identity that matches no
+// artifact at all maps to 'not_found' (→ 404), distinct from containment's
+// 'forbidden' (→ 403). detail() resolves bundles itself since F2 so recovered
+// cards can expand.
+function notFound() {
+  const e = new Error('not found');
+  e.code = 'not_found';
+  return e;
+}
+
+// Containment + existence for a legacy path ref, shared by detail() and the
+// export resolver: outside ROOT → 'forbidden' (403); missing or not a regular
+// file → 'not_found' (404), never a raw ENOENT (which the endpoint would 500).
+function containedFilePath(ref) {
+  const resolved = path.resolve(ref);
+  if (!isInside(resolved, ROOT)) throw new Error('forbidden');
+  let st;
+  try { st = fs.statSync(resolved); } catch { throw notFound(); }
+  if (!st.isFile()) throw notFound();
+  return resolved;
+}
+
+// Export resolution: any ref → a SessionBundle shape for collectBundleEvents.
+// Opaque refs are the reference's UUID branch (full bundle: main + companion
+// subagents + index). Path refs mirror its direct-file branch
+// (extract-session.py resolve_session:120-131): a top-level `.jsonl` is
+// main-only even if a companion folder exists, and a subagent file (parent dir
+// `subagents/` or `agent-*` name) is a subagent-only bundle whose session id
+// is sniffed from records at collect time. A path invocation never picks up
+// companion artifacts the caller didn't name.
+async function resolveRefToBundle(ref) {
   const identity = decodeClaudeRef(ref);
   if (identity) {
     const bundle = await resolveBundle(identity);
-    if (!bundle || !bundle.mainPath) {
-      const e = new Error('not found');
-      e.code = 'not_found';
-      throw e;
-    }
-    return bundle.mainPath;
+    if (!bundle) throw notFound(); // no artifact survives for this identity
+    return bundle;
   }
-  const resolved = path.resolve(ref);
-  if (!isInside(resolved, ROOT)) throw new Error('forbidden');
-  return resolved;
+  // Missing/non-file path refs are a client error (stale ref), not a 500 —
+  // endpoint-hygiene divergence from the reference's CLI crash.
+  const resolved = containedFilePath(ref);
+  const base = path.basename(resolved);
+  if (path.basename(path.dirname(resolved)) === 'subagents' || base.startsWith('agent-')) {
+    return {
+      identity: { source, projectSlug: null, sessionId: null },
+      mainPath: null,
+      folderPath: null,
+      subagentPaths: [resolved],
+      indexMeta: null,
+    };
+  }
+  const sessionId = base.replace(/\.jsonl$/, '');
+  return {
+    identity: { source, projectSlug: null, sessionId },
+    mainPath: resolved,
+    folderPath: null,
+    subagentPaths: [],
+    indexMeta: await loadSessionIndex(path.dirname(resolved), sessionId),
+  };
 }
 
 // ADR-0017's explicit preview behavior for recovered sessions (F2): a
@@ -271,25 +311,22 @@ export async function detail(ref, lastN = 30) {
     if (!bundle.mainPath) return recoveredDetail(bundle);
     return mainDetail(bundle.mainPath, lastN);
   }
-  const resolved = path.resolve(ref);
-  if (!isInside(resolved, ROOT)) throw new Error('forbidden');
-  return mainDetail(resolved, lastN);
+  return mainDetail(containedFilePath(ref), lastN);
 }
 
 // ---------------------------------------------------------------------------
-// Full-fidelity export: convert a Claude main transcript into the shared
+// Full-fidelity export: convert a Claude session BUNDLE into the shared
 // normalized-event contract the renderer (server/export.js) consumes. Direct
-// port of extract-session.py's main-transcript path (load_jsonl_events +
-// extract_user_tool_results + extract_assistant_blocks feeding render_event).
-// Conversion is flag-independent — EVERYTHING is emitted; the renderer filters.
-// This reproduces `/replay <id> --full` byte-for-byte.
+// port of extract-session.py's collection paths (load_jsonl_events +
+// extract_user_tool_results + extract_assistant_blocks + load_history_events
+// feeding render_event). This reproduces `/replay <id> --full` byte-for-byte.
 //
-// Scope: 1A — the top-level `<id>.jsonl` main transcript, with header metadata
-// enriched from the project-slug dir's sessions-index.json when an entry
-// matches (ADR-0015; /replay's direct-path branch calls
-// load_session_index(p.parent, p.stem)). No subagents / history.jsonl /
-// folder-only / index-only recovery (that is Phase 1B, ADR-0012, which also
-// needs list() + a stable ref format).
+// Scope since F3 (Phase 1B complete): main transcript + subagent sidechains +
+// history.jsonl backfill + folder-only / index-only recovery, with header
+// metadata enriched from the project-slug dir's sessions-index.json when an
+// entry matches (ADR-0015). Conversion keeps every event and filtering is
+// render-time (ADR-0004), except history backfill — the one collect-time
+// flag, tri-state `auto|on|off` resolved per-session.
 // ---------------------------------------------------------------------------
 
 // loadSessionIndex (the load_session_index port, incl. the structural-
@@ -316,51 +353,36 @@ function userToolResults(message) {
   return out;
 }
 
-// `opts` accepted for registry-signature parity but intentionally unused — like
-// the Codex adapter, conversion keeps every event; filtering is render-time.
-// history.jsonl backfill (the one collect-time flag) is Phase 1B, not here.
-export async function collectEvents(ref, _opts = {}) {
-  const resolved = await resolveRefToMainPath(ref);
-  const sessionId = path.basename(resolved).replace(/\.jsonl$/, '');
-
-  // Live-main index enrichment (ADR-0015): only the four fields the renderer's
-  // header emits — firstPrompt/modified exist in index entries but /replay
-  // never renders them, so they stay out of the meta contract. Falsey values
-  // pass through; renderMarkdown suppresses them exactly like the Python
-  // truthiness checks. Loaded BEFORE the readline interface exists: awaiting
-  // between createInterface and the for-await loop would let 'line' events
-  // fire with no consumer attached and starve the iterator.
-  const idx = await loadSessionIndex(path.dirname(resolved), sessionId);
-
+// Read one transcript file (main or subagent) into the shared sinks. `srcTag`
+// stamps each event's `source` ('main' | 'subagent:<stem>'); the sidechain flag
+// always comes from the record itself (`isSidechain`), mirroring render_event —
+// the reference never forces it per-file. Optional sinks: `sniff` captures the
+// first record-level sessionId (raw subagent path refs arrive without one,
+// py:848-855); `mainUserStrings` collects raw STRING-valued user content for
+// the history dedup seen-set (py:861-868 — the key is built from the raw
+// string, and only string content participates). No `await` may sit between
+// createInterface and the for-await loop (a consumer-less 'line' event would
+// starve the iterator — real hang).
+async function readTranscriptEvents(file, srcTag, { events, cwdCandidates, sniff, mainUserStrings }) {
   const rl = readline.createInterface({
-    input: fs.createReadStream(resolved, { encoding: 'utf-8' }),
+    input: fs.createReadStream(file, { encoding: 'utf-8' }),
     crlfDelay: Infinity,
   });
 
-  const events = [];
-  const cwdCandidates = []; // { ts, cwd } across ALL records — mirrors main()'s post-sort cwd scan
-  const meta = {
-    source, isCodex: false, mainPath: resolved,
-    sessionId, cwd: null, historyOn: false,
-  };
-  if (idx) {
-    meta.summary = idx.summary;
-    meta.created = idx.created;
-    meta.gitBranch = idx.gitBranch;
-    meta.messageCount = idx.messageCount;
-  }
   const emit = (role, ts, blocks, extra = {}) =>
-    events.push({ role, ts: ts || '', source: 'main', ...extra, blocks });
+    events.push({ role, ts: ts || '', source: srcTag, ...extra, blocks });
 
   for await (const line of rl) {
     const t = line.trim();
     if (!t) continue;
     let o; try { o = JSON.parse(t); } catch { continue; }
+    if (sniff && !sniff.sessionId && o.sessionId) sniff.sessionId = o.sessionId;
     const ts = o.timestamp || '';
     if (o.cwd) cwdCandidates.push({ ts, cwd: o.cwd });
 
     const msg = o.message;
     if (o.type === 'user' && msg) {
+      if (mainUserStrings && typeof msg.content === 'string') mainUserStrings.push(msg.content);
       const content = msg.content;
       const sidechain = !!o.isSidechain;
       const meta_ = !!o.isMeta;
@@ -395,6 +417,151 @@ export async function collectEvents(ref, _opts = {}) {
     }
     // file-history-snapshot / system / summary / etc.: not conversational — dropped.
   }
+}
+
+// ---- history.jsonl backfill (port of load_history_events, py:339-373) -------
+
+// Captured at import time like ROOT — tests that stage a fake HOME must run
+// adapter code in a child process. Read fresh on every export and never
+// stat'd into any cache signature: history.jsonl must not invalidate listing
+// caches (ADR-0017).
+const HISTORY_PATH = path.join(os.homedir(), '.claude', 'history.jsonl');
+
+// Port of ms_to_iso (py:339-342): exact `YYYY-MM-DDTHH:mm:ss.mmmZ`.
+// toISOString emits floored seconds + positive milliseconds, byte-equal to
+// Python's fromtimestamp + `whole % 1000` for every finite in-range epoch,
+// negatives included.
+function msToIso(tsMs) {
+  return new Date(Math.trunc(tsMs)).toISOString();
+}
+
+// Python slices code points ([:200]); a UTF-16 .slice could count astral
+// chars double and disagree with the reference near the boundary.
+function cpSlice(s, n) {
+  let out = '', i = 0;
+  for (const ch of s) {
+    if (i++ >= n) break;
+    out += ch;
+  }
+  return out;
+}
+
+// Port of normalize_user_text (py:261-267): the dedup key for history
+// backfill. Order is load-bearing: clean_user_text FIRST (noise-tag strip +
+// command-name rewrite), then whitespace-collapse, trim, lowercase, cap at
+// 200 code points.
+function normalizeUserText(s) {
+  if (typeof s !== 'string') return '';
+  return cpSlice(cleanUserText(s, false).replace(/\s+/g, ' ').trim().toLowerCase(), 200);
+}
+
+// → [{ ts, display, project }] for this session, in file order. Skips lines
+// mirroring the reference: wrong session, missing timestamp, blank display.
+// Non-numeric/out-of-range timestamps are skipped too (the reference CLI
+// would crash there; unobservable divergence, fail-soft is right for HTTP).
+async function loadHistoryEvents(sessionId) {
+  const out = [];
+  try { if (!fs.statSync(HISTORY_PATH).isFile()) return out; } catch { return out; }
+  const rl = readline.createInterface({
+    input: fs.createReadStream(HISTORY_PATH, { encoding: 'utf-8' }),
+    crlfDelay: Infinity,
+  });
+  for await (const line of rl) {
+    const t = line.trim();
+    if (!t) continue;
+    let h; try { h = JSON.parse(t); } catch { continue; }
+    if (!h || typeof h !== 'object' || h.sessionId !== sessionId) continue;
+    if (h.timestamp === null || h.timestamp === undefined) continue;
+    const ms = Math.trunc(Number(h.timestamp));
+    if (!Number.isFinite(ms) || Math.abs(ms) > 8.64e15) continue;
+    const display = h.display || '';
+    if (typeof display !== 'string' || !display.trim()) continue;
+    out.push({ ts: msToIso(ms), display, project: h.project });
+  }
+  return out;
+}
+
+// Collect a resolved bundle's events (port of extract-session.py main()'s
+// collection block, py:833-882): main → lexically-sorted subagents → history
+// backfill, then ONE stable ts sort — the concatenation order is the
+// equal-timestamp tiebreaker, so it must match the reference exactly.
+async function collectBundleEvents(bundle, opts = {}) {
+  const idx = bundle.indexMeta;
+  const events = [];
+  const cwdCandidates = []; // { ts, cwd } across ALL records — mirrors main()'s post-sort cwd scan
+  const sniff = { sessionId: null };
+  const mainUserStrings = [];
+
+  // Flag resolution (py:833-841): a subagent-only bundle (folder-only session
+  // or raw subagent path ref) forces sidechains on so recovered events aren't
+  // filtered out, and resolves history auto→on; every other shape resolves
+  // auto→off (index-only included — is_folder_only requires subagents).
+  // Requested opts are never mutated (ADR-0014): the renderer filters on the
+  // returned resolvedOpts, while filename tokens derived from requested opts
+  // upstream at the endpoint.
+  const recoveredSub = !bundle.mainPath && bundle.subagentPaths.length > 0;
+  const sidechains = !!opts.sidechains || recoveredSub;
+  const historyOn = opts.history === 'on' ? true
+                  : opts.history === 'off' ? false
+                  : recoveredSub;
+
+  if (bundle.mainPath) {
+    await readTranscriptEvents(bundle.mainPath, 'main', { events, cwdCandidates, sniff, mainUserStrings });
+  }
+  for (const sp of bundle.subagentPaths) {
+    const stem = path.basename(sp).replace(/\.[^.]*$/, ''); // Python p.stem
+    await readTranscriptEvents(sp, `subagent:${stem}`, { events, cwdCandidates, sniff });
+  }
+
+  // Session id may be unknown for a raw subagent path ref — sniffed from the
+  // records in load order (py:848-855).
+  const sessionId = bundle.identity.sessionId || sniff.sessionId || null;
+
+  let historyAdded = 0;
+  if (historyOn && sessionId) {
+    let hist = await loadHistoryEvents(sessionId);
+    if (bundle.mainPath && hist.length) {
+      // Dedup ONLY against main-transcript user turns with string content
+      // (py:857-870); subagent turns never participate, and a folder-only
+      // bundle backfills wholesale.
+      const seen = new Set();
+      for (const s of mainUserStrings) {
+        const key = normalizeUserText(s);
+        if (key) seen.add(key);
+      }
+      hist = hist.filter((h) => !seen.has(normalizeUserText(h.display)));
+    }
+    for (const h of hist) {
+      events.push({
+        role: 'user', ts: h.ts, source: 'history',
+        sidechain: false, meta: false,
+        blocks: [{ kind: 'text', text: h.display }],
+      });
+      // Only SURVIVING history events join the cwd scan — the reference
+      // appends post-filter, then scans (py:871, 877-882).
+      if (h.project) cwdCandidates.push({ ts: h.ts, cwd: h.project });
+    }
+    historyAdded = hist.length;
+  }
+
+  const meta = {
+    source, isCodex: false, mainPath: bundle.mainPath,
+    sessionId, cwd: null,
+    subagentCount: bundle.subagentPaths.length,
+    folder: bundle.folderPath,
+    historyOn, historyAdded,
+  };
+  // Index enrichment (ADR-0015): only the four fields the renderer's header
+  // emits — firstPrompt/modified exist in index entries but /replay never
+  // renders them, so they stay out of the meta contract. Falsey values pass
+  // through; renderMarkdown suppresses them exactly like the Python
+  // truthiness checks.
+  if (idx) {
+    meta.summary = idx.summary;
+    meta.created = idx.created;
+    meta.gitBranch = idx.gitBranch;
+    meta.messageCount = idx.messageCount;
+  }
 
   // cwd = first record (by sorted timestamp, across all records) carrying a cwd,
   // matching main()'s scan AFTER the global timestamp sort.
@@ -404,5 +571,18 @@ export async function collectEvents(ref, _opts = {}) {
   // extract-session.py sorts all events by ISO timestamp; Array.sort is stable
   // (Node 12+) so equal-ts events keep emission order, matching Python.
   events.sort((a, b) => (a.ts < b.ts ? -1 : a.ts > b.ts ? 1 : 0));
-  return { meta, events };
+
+  return {
+    meta,
+    events,
+    resolvedOpts: { ...opts, sidechains, history: historyOn ? 'on' : 'off' },
+  };
+}
+
+// Conversion keeps every event (filtering is render-time, ADR-0004) with ONE
+// collect-time exception: history.jsonl backfill, resolved from the tri-state
+// `opts.history` inside collectBundleEvents.
+export async function collectEvents(ref, opts = {}) {
+  const bundle = await resolveRefToBundle(ref);
+  return collectBundleEvents(bundle, opts);
 }

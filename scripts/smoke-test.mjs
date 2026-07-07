@@ -232,8 +232,8 @@ await acheck('export endpoint: unsupported source → 400 + no-store', async () 
 const CLAUDE_CAPS = exportCapabilities('claude');
 const CODEX_CAPS = exportCapabilities('codex');
 
-check('caps: claude sidechains/history unavailable, tools supported', () =>
-  CLAUDE_CAPS.sidechains === 'unavailable' && CLAUDE_CAPS.history === 'unavailable' && CLAUDE_CAPS.tools === 'supported');
+check('caps: claude sidechains/history supported since F3, tools supported', () =>
+  CLAUDE_CAPS.sidechains === 'supported' && CLAUDE_CAPS.history === 'supported' && CLAUDE_CAPS.tools === 'supported');
 check('caps: codex sidechains/embedImages notApplicable, raw supported', () =>
   CODEX_CAPS.sidechains === 'notApplicable' && CODEX_CAPS.embedImages === 'notApplicable' && CODEX_CAPS.raw === 'supported');
 check('caps: non-export source has null capabilities', () => exportCapabilities('grok') === null);
@@ -250,13 +250,21 @@ check('resolve: explicit sidechains=true → 400 even with full (codex)', () => 
   const r = resolveExportOptions({ full: true, sidechains: true, history: 'auto', maxChars: 400 }, CODEX_CAPS);
   return r.error && r.option === 'sidechains' && r.state === 'notApplicable';
 });
-check('resolve: claude history="on" → error unavailable', () => {
+check('resolve: claude history="on" accepted since F3, token emitted', () => {
   const r = resolveExportOptions({ history: 'on', maxChars: 400 }, CLAUDE_CAPS);
+  return !r.error && r.effective.history === 'on' && r.tokens.join(',') === 'history';
+});
+check('resolve: history="on" → error when unavailable (synthetic 1A caps)', () => {
+  const r = resolveExportOptions({ history: 'on', maxChars: 400 }, { ...CLAUDE_CAPS, history: 'unavailable' });
   return r.error && r.option === 'history' && r.state === 'unavailable';
 });
 check('resolve: history="auto" resolves to off when unsupported', () => {
-  const r = resolveExportOptions({ history: 'auto', maxChars: 400 }, CLAUDE_CAPS);
+  const r = resolveExportOptions({ history: 'auto', maxChars: 400 }, { ...CLAUDE_CAPS, history: 'unavailable' });
   return !r.error && r.effective.history === 'off';
+});
+check('resolve: history="auto" passes through when supported (session-resolved)', () => {
+  const r = resolveExportOptions({ history: 'auto', maxChars: 400 }, CLAUDE_CAPS);
+  return !r.error && r.effective.history === 'auto' && r.tokens.length === 0;
 });
 // turning an unsupported option OFF is the safe direction — never validated.
 check('resolve: sidechains=false / history="off" never error (codex)', () => {
@@ -281,7 +289,7 @@ check('resolve: default (no flags) succeeds with empty caps', () => {
 await acheck('/api/sources exposes tri-value exportCapabilities', async () => {
   const res = await callApi('/api/sources');
   const body = JSON.parse(res.body);
-  if (body.claude.exportCapabilities?.sidechains !== 'unavailable') throw new Error('claude caps missing/incorrect');
+  if (body.claude.exportCapabilities?.sidechains !== 'supported') throw new Error('claude caps missing/incorrect');
   if (body.codex.exportCapabilities?.embedImages !== 'notApplicable') throw new Error('codex caps missing/incorrect');
   if ('exportCapabilities' in body.grok) throw new Error('non-export source should not expose capabilities');
 });
@@ -294,19 +302,21 @@ await acheck('export endpoint: codex sidechains=1 → 400 names the option', asy
   const msg = JSON.parse(res.body).error;
   if (msg !== "sidechains not applicable to source 'codex'") throw new Error(`unexpected message: ${msg}`);
 });
-await acheck('export endpoint: claude history=on → 400 names the option', async () => {
-  const res = await callApi('/api/export?source=claude&ref=x&history=on');
-  if (res.statusCode !== 400) throw new Error(`expected 400, got ${res.statusCode}`);
-  const msg = JSON.parse(res.body).error;
-  if (msg !== "history not available for source 'claude'") throw new Error(`unexpected message: ${msg}`);
+await acheck('export endpoint: claude history=on passes capability gate (404 on missing id, not 400)', async () => {
+  // Since F3, history is supported for Claude: an explicit history=on must
+  // clear validation and fail LATER on ref resolution (missing identity → 404).
+  const res = await callApi('/api/export?source=claude&ref=v1%3A-f3-no-such%3A00000000-0000-4000-8000-0000000f3f3f&history=on');
+  if (res.statusCode !== 404) throw new Error(`expected 404, got ${res.statusCode}: ${res.body.slice(0, 120)}`);
 });
 
 // Happy-path THROUGH the endpoint: `full` must reach the renderer with all four flags
 // on. The parity harness expands full manually, so only an endpoint test catches a
 // mis-wired handler. Data-dependent: runs only when a real session exists.
-// Recovered Claude sessions (exportable:false, F2) have no exporter until F3 —
-// endpoint happy-path tests must pick an entry with a main transcript.
-const firstExportable = (src) => bySource[src]?.find((c) => c.exportable !== false);
+// Since F3 every Claude card is exportable, but recovered (folder-only /
+// index-only) sessions may render header-only documents — happy-path tests
+// that assert on body content still want a card with a main transcript, so
+// prefer one with a resume command (recovered cards have resume '').
+const firstExportable = (src) => bySource[src]?.find((c) => c.resume) ?? bySource[src]?.[0];
 for (const src of ['codex', 'claude']) {
   if (!firstExportable(src)) continue;
   await acheck(`export endpoint: full=1 reaches renderer with four flags (${src})`, async () => {
@@ -742,8 +752,9 @@ await acheck('claude bundle resolver: era matrix + composite signature', async (
 
 // Dual-scheme acceptance: the SAME session through a path ref and an opaque
 // ref must be byte-identical (export) and deep-equal (detail); a folder-only
-// identity has no main transcript in F1 → code 'not_found'.
-await acheck('claude dual-scheme refs: opaque ≡ path; folder-only → not_found', async () => {
+// identity exports a recovered document since F3 (sidechains forced on,
+// history auto-on, folder-only header line).
+await acheck('claude dual-scheme refs: opaque ≡ path; folder-only exports recovered doc', async () => {
   const tempHome = fs.mkdtempSync(path.join(os.tmpdir(), 'asm-claude-f1dual-'));
   try {
     const staged = stageClaudeProject(tempHome, '-f1-dual');
@@ -763,9 +774,19 @@ await acheck('claude dual-scheme refs: opaque ≡ path; folder-only → not_foun
         const mdB = renderMarkdown(b.events, b.meta, { full: true });
         const dA = JSON.stringify(await claude.detail(pathRef, 10));
         const dB = JSON.stringify(await claude.detail(opaqueRef, 10));
-        let foCode = null;
-        try { await claude.collectEvents(foRef); } catch (e) { foCode = e.code || e.message; }
-        process.stdout.write(JSON.stringify({ sameMd: mdA === mdB, mdLen: mdA.length, sameDetail: dA === dB, foCode }));
+        const fo = await claude.collectEvents(foRef);
+        const foMd = renderMarkdown(fo.events, fo.meta, fo.resolvedOpts);
+        process.stdout.write(JSON.stringify({
+          sameMd: mdA === mdB, mdLen: mdA.length, sameDetail: dA === dB,
+          fo: {
+            mainPath: fo.meta.mainPath, subagentCount: fo.meta.subagentCount,
+            historyOn: fo.meta.historyOn, historyAdded: fo.meta.historyAdded,
+            sidechains: fo.resolvedOpts.sidechains, history: fo.resolvedOpts.history,
+            foMdHasFolderLine: foMd.includes('- **main**: _(none — folder-only session; main transcript was not retained)_'),
+            foMdHasSubLine: foMd.includes('- **subagents**: 1 file(s)'),
+            foMdHasHistLine: foMd.includes('- **history.jsonl**: 0 user prompt(s) interleaved'),
+          },
+        }));
       `,
         staged,
         `v1:-f1-dual:${CLAUDE_IDX_SESSION}`,
@@ -777,7 +798,13 @@ await acheck('claude dual-scheme refs: opaque ≡ path; folder-only → not_foun
     ));
     if (!out.sameMd || out.mdLen === 0) throw new Error('opaque-ref export differs from path-ref export');
     if (!out.sameDetail) throw new Error('opaque-ref detail differs from path-ref detail');
-    if (out.foCode !== 'not_found') throw new Error(`folder-only opaque ref: expected code 'not_found', got ${out.foCode}`);
+    const fo = out.fo;
+    if (fo.mainPath !== null || fo.subagentCount !== 1) throw new Error('folder-only bundle wrong shape');
+    if (fo.sidechains !== true) throw new Error('folder-only must force resolvedOpts.sidechains on');
+    if (fo.historyOn !== true || fo.history !== 'on') throw new Error('folder-only must resolve history auto→on');
+    if (fo.historyAdded !== 0) throw new Error('no history.jsonl staged — historyAdded must be 0');
+    if (!fo.foMdHasFolderLine || !fo.foMdHasSubLine || !fo.foMdHasHistLine)
+      throw new Error('folder-only export missing expected header lines');
   } finally {
     fs.rmSync(tempHome, { recursive: true, force: true });
   }
@@ -791,11 +818,222 @@ await acheck('conversation endpoint: missing opaque identity → 404', async () 
   const res = await callApi(`/api/conversation?source=claude&ref=${encodeURIComponent(F1_MISSING_REF)}`);
   if (res.statusCode !== 404) throw new Error(`expected 404, got ${res.statusCode}`);
 });
+// Stale PATH refs (contained but deleted/non-file) are client errors on both
+// ref-consuming endpoints — 404, never a raw ENOENT → 500 (Codex F3 review Major).
+const F1_STALE_PATH = path.join(os.homedir(), '.claude', 'projects', '__asm-no-such__', '__asm-missing__.jsonl');
+await acheck('conversation endpoint: stale claude path ref → 404', async () => {
+  const res = await callApi(`/api/conversation?source=claude&ref=${encodeURIComponent(F1_STALE_PATH)}`);
+  if (res.statusCode !== 404) throw new Error(`expected 404, got ${res.statusCode}: ${res.body.slice(0, 120)}`);
+});
+await acheck('export endpoint: stale claude path ref → 404', async () => {
+  const res = await callApi(`/api/export?source=claude&ref=${encodeURIComponent(F1_STALE_PATH)}&full=1`);
+  if (res.statusCode !== 404) throw new Error(`expected 404, got ${res.statusCode}: ${res.body.slice(0, 120)}`);
+});
 await acheck('export endpoint: missing opaque identity → 404 + no-store', async () => {
   const res = await callApi(`/api/export?source=claude&ref=${encodeURIComponent(F1_MISSING_REF)}&full=1`);
   if (res.statusCode !== 404) throw new Error(`expected 404, got ${res.statusCode}`);
   if (res.getHeader('cache-control') !== 'no-store') throw new Error('missing Cache-Control: no-store');
 });
+
+// ---- F3: the 1B converter — subagents, history.jsonl backfill, recovery -----
+// One adversarial staged home drives BOTH a golden diff against the Python
+// reference (every collection rule crossed with the full flag matrix) and a
+// hermetic behavior test (no Python). Sessions: F3G (main + 2 subagent files +
+// index entry), FOLDG (folder-only), INDXG (index-only), plus a history.jsonl
+// exercising the dedup matrix: exact dup, noise-tag dup (clean_user_text must
+// run FIRST), whitespace/case dup, >200-code-point shared-prefix dup (slice
+// cap), array-content non-dup (string-only rule), wrong-session / null-ts /
+// blank-display skips, and a .123 millisecond timestamp (ms_to_iso format).
+const F3G = 'f39a1de0-1111-4222-8333-444455556666';
+const F3_FOLDG = 'f3f01de0-1111-4222-8333-444455556666';
+const F3_INDXG = 'f31de000-1111-4222-8333-444455556666';
+const F3_SLUG = '-f3-bundle';
+const stageF3Home = (tempHome) => {
+  const proj = path.join(tempHome, '.claude', 'projects', F3_SLUG);
+  const j = (o) => JSON.stringify(o) + '\n';
+  const rec = (type, sessionId, ts, content, extra = {}) =>
+    j({ type, sessionId, timestamp: ts, message: { role: type, content }, ...extra });
+
+  fs.mkdirSync(path.join(proj, F3G, 'subagents'), { recursive: true });
+  fs.mkdirSync(path.join(proj, F3_FOLDG, 'subagents'), { recursive: true });
+  fs.writeFileSync(path.join(proj, `${F3G}.jsonl`),
+    rec('user', F3G, '2026-01-01T10:00:00.000Z', 'hello world', { cwd: '/tmp/f3-main-cwd' })
+    + rec('assistant', F3G, '2026-01-01T10:00:01.000Z', [{ type: 'text', text: 'hi there' }])
+    + rec('user', F3G, '2026-01-01T10:00:02.000Z', '<system-reminder>ignore this</system-reminder>Run the tests')
+    + rec('user', F3G, '2026-01-01T10:00:03.000Z', [{ type: 'text', text: 'array prompt' }])
+    + rec('user', F3G, '2026-01-01T10:00:04.000Z', 'y'.repeat(210) + 'MAIN-TAIL')
+    + rec('user', F3G, '2026-01-01T12:00:00.000Z', 'main collision'));
+  fs.writeFileSync(path.join(proj, F3G, 'subagents', 'agent-a.jsonl'),
+    rec('user', F3G, '2026-01-01T11:00:00.000Z', 'sub A prompt', { isSidechain: true })
+    + rec('assistant', F3G, '2026-01-01T11:00:01.000Z', [{ type: 'text', text: 'sub A reply' }], { isSidechain: true })
+    + rec('user', F3G, '2026-01-01T11:00:02.000Z', 'no sidechain flag record'));
+  fs.writeFileSync(path.join(proj, F3G, 'subagents', 'agent-b.jsonl'),
+    rec('assistant', F3G, '2026-01-01T11:30:00.000Z', [{ type: 'text', text: 'sub B reply' }], { isSidechain: true })
+    + rec('user', F3G, '2026-01-01T12:00:00.000Z', 'sub collision', { isSidechain: true }));
+  fs.writeFileSync(path.join(proj, F3_FOLDG, 'subagents', 'agent-z.jsonl'),
+    rec('user', F3_FOLDG, '2026-01-01T13:59:00.000Z', 'sub Z prompt', { isSidechain: true, cwd: '/tmp/f3-sub-cwd' })
+    + rec('assistant', F3_FOLDG, '2026-01-01T13:59:30.000Z', [{ type: 'text', text: 'sub Z reply' }], { isSidechain: true }));
+  fs.writeFileSync(path.join(proj, 'sessions-index.json'), JSON.stringify({
+    version: 1,
+    entries: [
+      { sessionId: F3G, summary: 'F3 golden bundle', created: '2026-01-01T09:00:00.000Z', gitBranch: 'f3-branch', messageCount: 6 },
+      { sessionId: F3_INDXG, summary: 'F3 index-only', created: '2026-01-02T09:00:00.000Z', gitBranch: 'f3-idx-branch', messageCount: 3 },
+    ],
+  }));
+  const hl = (sessionId, tsMs, display, extra = {}) => j({ sessionId, timestamp: tsMs, display, ...extra });
+  const T = (iso) => Date.parse(iso);
+  fs.writeFileSync(path.join(tempHome, '.claude', 'history.jsonl'),
+    hl(F3G, T('2026-01-01T10:00:00.000Z'), 'hello world', { project: '/tmp/f3-hist-cwd' }) // exact dup → deduped
+    + hl(F3G, T('2026-01-01T10:00:02.500Z'), 'run   THE tests')                            // dup ONLY if clean runs before normalize
+    + hl(F3G, T('2026-01-01T10:30:00.000Z'), 'array prompt')                               // main had ARRAY content → NOT deduped
+    + hl(F3G, T('2026-01-01T10:31:00.000Z'), 'y'.repeat(210) + 'HIST-TAIL')                // equal first 200 cps → deduped
+    + hl(F3G, T('2026-01-01T12:00:00.000Z'), 'hist collision')                             // survives; equal-ts tiebreak probe
+    + hl('aaaa0000-1111-4222-8333-444455556666', T('2026-01-01T10:05:00.000Z'), 'other session line')
+    + hl(F3G, null, 'null ts line')                                                        // skipped (no timestamp)
+    + hl(F3G, T('2026-01-01T10:32:00.000Z'), '   ')                                        // skipped (blank display)
+    + hl(F3G, T('2026-01-01T13:00:00.000Z') + 123, 'fresh prompt')                         // survives; pins .123Z formatting
+    + hl(F3_FOLDG, T('2026-01-01T14:00:00.000Z'), 'sub Z prompt')                          // folder-only: NO dedup (no main)
+    + hl(F3_FOLDG, T('2026-01-01T14:01:00.000Z'), 'unique fold prompt')
+    + hl(F3_INDXG, T('2026-01-01T15:00:00.000Z'), 'index prompt'));
+  return proj;
+};
+
+// (F3a) Golden diff: all three staged sessions through the parity harness —
+// 15 combos each (incl. --history/--no-history) against the Python reference,
+// under a snapshot HOME so history content is deterministic (ADR-0010/0018).
+await acheck('claude F3 export: bundle golden diff (subagents/history/recovery)', async () => {
+  const tempHome = fs.mkdtempSync(path.join(os.tmpdir(), 'asm-claude-f3g-'));
+  try {
+    stageF3Home(tempHome);
+    execFileSync(
+      process.execPath,
+      [
+        fileURLToPath(new URL('./export-parity.mjs', import.meta.url)), 'claude',
+        `v1:${F3_SLUG}:${F3G}`, `v1:${F3_SLUG}:${F3_FOLDG}`, `v1:${F3_SLUG}:${F3_INDXG}`,
+      ],
+      {
+        env: {
+          ...process.env,
+          HOME: tempHome,
+          EXTRACT_PY: process.env.EXTRACT_PY
+            || path.join(os.homedir(), 'projects', 'claude-session-tools', 'plugins', 'session-tools', 'scripts', 'extract-session.py'),
+        },
+        encoding: 'utf8',
+      },
+    );
+  } finally {
+    fs.rmSync(tempHome, { recursive: true, force: true });
+  }
+});
+
+// (F3b) Hermetic converter behavior (no Python): dedup matrix, collect-order
+// tiebreak, record-sourced sidechain flag, subagent path refs with sniffed
+// session id, tri-state resolution, signature invariance, stale-ref 404s.
+await acheck('claude F3 export: converter semantics (hermetic)', async () => {
+  const tempHome = fs.mkdtempSync(path.join(os.tmpdir(), 'asm-claude-f3h-'));
+  try {
+    const proj = stageF3Home(tempHome);
+    const out = JSON.parse(execFileSync(
+      process.execPath,
+      ['--input-type=module', '-e', `
+        const [proj, slug, F3G, FOLDG, INDXG, adapterUrl, bundleUrl, exportUrl] = process.argv.slice(1);
+        const path = await import('node:path');
+        const claude = await import(adapterUrl);
+        const { resolveBundle } = await import(bundleUrl);
+        const { renderMarkdown } = await import(exportUrl);
+        const opq = (id) => 'v1:' + slug + ':' + id;
+
+        const sigBefore = (await resolveBundle({ projectSlug: slug, sessionId: F3G })).compositeSignature;
+        const full = await claude.collectEvents(opq(F3G), { history: 'on' });
+        const sigAfter = (await resolveBundle({ projectSlug: slug, sessionId: F3G })).compositeSignature;
+
+        const auto = await claude.collectEvents(opq(F3G));
+        const pathMain = await claude.collectEvents(path.join(proj, F3G + '.jsonl'));
+        const subPath = await claude.collectEvents(path.join(proj, F3G, 'subagents', 'agent-a.jsonl'));
+        const foldg = await claude.collectEvents(opq(FOLDG));
+        const indxg = await claude.collectEvents(opq(INDXG));
+        const indxgOn = await claude.collectEvents(opq(INDXG), { history: 'on' });
+
+        const code = async (ref) => { try { await claude.collectEvents(ref); return null; } catch (e) { return e.code || e.message; } };
+
+        const mdNoSide = renderMarkdown(full.events, full.meta, { history: 'on' }); // sidechains off
+        process.stdout.write(JSON.stringify({
+          histTexts: full.events.filter((e) => e.source === 'history').map((e) => e.blocks[0].text),
+          historyAdded: full.meta.historyAdded, historyOn: full.meta.historyOn,
+          collisionOrder: full.events.filter((e) => e.ts === '2026-01-01T12:00:00.000Z').map((e) => e.source),
+          freshTs: full.events.find((e) => e.source === 'history' && e.blocks[0].text === 'fresh prompt')?.ts,
+          meta: { subagentCount: full.meta.subagentCount, folderOk: full.meta.folder === path.join(proj, F3G), sessionId: full.meta.sessionId, summary: full.meta.summary },
+          fullSidechains: full.resolvedOpts.sidechains,
+          sigStable: sigBefore === sigAfter,
+          autoHistory: { on: auto.meta.historyOn, resolved: auto.resolvedOpts.history },
+          pathMainSubEvents: pathMain.events.filter((e) => e.source !== 'main').length,
+          pathMainSubCount: pathMain.meta.subagentCount,
+          subPath: {
+            sessionId: subPath.meta.sessionId, sidechains: subPath.resolvedOpts.sidechains,
+            historyOn: subPath.meta.historyOn, historyAdded: subPath.meta.historyAdded,
+            mainPath: subPath.meta.mainPath,
+          },
+          foldg: { historyAdded: foldg.meta.historyAdded, sidechains: foldg.resolvedOpts.sidechains, cwd: foldg.meta.cwd },
+          indxg: { events: indxg.events.length, historyOn: indxg.meta.historyOn },
+          indxgOn: { historyAdded: indxgOn.meta.historyAdded, events: indxgOn.events.length },
+          staleFile: await code(path.join(proj, 'nope.jsonl')),
+          dirRef: await code(path.join(proj, F3G)),
+          noFlagRendered: mdNoSide.includes('no sidechain flag record'),
+          sideFiltered: !mdNoSide.includes('sub A prompt'),
+        }));
+      `,
+        proj, F3_SLUG, F3G, F3_FOLDG, F3_INDXG,
+        new URL('../server/sources/claude.js', import.meta.url).href,
+        new URL('../server/sources/claudeBundle.js', import.meta.url).href,
+        new URL('../server/export.js', import.meta.url).href,
+      ],
+      { env: { ...process.env, HOME: tempHome }, encoding: 'utf8' },
+    ));
+
+    if (out.histTexts.join('|') !== 'array prompt|hist collision|fresh prompt')
+      throw new Error(`dedup matrix wrong: survivors [${out.histTexts.join(', ')}]`);
+    if (out.historyAdded !== 3 || out.historyOn !== true) throw new Error('history=on: wrong historyAdded/historyOn');
+    if (out.collisionOrder.join('|') !== 'main|subagent:agent-b|history')
+      throw new Error(`equal-ts tiebreak wrong: ${out.collisionOrder.join('|')}`);
+    if (out.freshTs !== '2026-01-01T13:00:00.123Z') throw new Error(`msToIso format wrong: ${out.freshTs}`);
+    if (out.meta.subagentCount !== 2 || !out.meta.folderOk || out.meta.sessionId !== F3G
+      || out.meta.summary !== 'F3 golden bundle') throw new Error('bundle meta wrong');
+    if (out.fullSidechains !== false) throw new Error('sidechains must not be forced when a main transcript exists');
+    if (!out.sigStable) throw new Error('history-on export must not move the composite signature (listing caches)');
+    if (out.autoHistory.on !== false || out.autoHistory.resolved !== 'off')
+      throw new Error('history auto must resolve OFF for a live-main bundle');
+    if (out.pathMainSubEvents !== 0 || out.pathMainSubCount !== 0)
+      throw new Error('path ref must stay main-only (direct-file branch parity)');
+    if (out.subPath.sessionId !== F3G || out.subPath.sidechains !== true || out.subPath.historyOn !== true
+      || out.subPath.mainPath !== null) throw new Error('subagent path ref: wrong sniffed id / forcing');
+    if (out.subPath.historyAdded !== 6) throw new Error(`subagent-only backfill must skip dedup (got ${out.subPath.historyAdded})`);
+    if (out.foldg.historyAdded !== 2 || out.foldg.sidechains !== true || out.foldg.cwd !== '/tmp/f3-sub-cwd')
+      throw new Error('folder-only: wrong backfill/forcing/cwd');
+    if (out.indxg.events !== 0 || out.indxg.historyOn !== false)
+      throw new Error('index-only default must be a header-only doc with history off');
+    if (out.indxgOn.historyAdded !== 1 || out.indxgOn.events !== 1)
+      throw new Error('index-only explicit history=on must backfill');
+    if (out.staleFile !== 'not_found' || out.dirRef !== 'not_found')
+      throw new Error('stale/non-file path refs must map to not_found');
+    if (!out.noFlagRendered) throw new Error('record without isSidechain must render with sidechains off (record-sourced flag)');
+    if (!out.sideFiltered) throw new Error('sidechain events must be filtered when sidechains off');
+  } finally {
+    fs.rmSync(tempHome, { recursive: true, force: true });
+  }
+});
+
+// (F3c) Endpoint: a RECOVERED entry (resume '') exports 200 since F3.
+// Data-dependent — runs only when the live listing has a recovered card.
+{
+  const recovered = bySource.claude?.find((c) => c.resume === '');
+  if (recovered) {
+    await acheck('export endpoint: recovered claude card exports 200 (F3)', async () => {
+      const res = await callApi(`/api/export?source=claude&ref=${encodeURIComponent(recovered.ref)}&full=1`);
+      if (res.statusCode !== 200) throw new Error(`expected 200, got ${res.statusCode}: ${res.body.slice(0, 120)}`);
+      if (!res.body.includes('# Session replay:')) throw new Error('missing replay header');
+    });
+  }
+}
 
 // Versioned star storage (src/starred.js): envelope precedence, one-shot
 // migration, fail-closed parsing.
@@ -975,8 +1213,8 @@ await acheck('claude list (F2): one card per identity, recovered cards, opaque r
     }
     const f = byId[FOLD];
     if (f.title !== 'Recovered folder session' || f.gitBranch !== 'rec-branch' || f.messageCount !== 42
-      || f.projectPath !== '/tmp/proj-x' || f.resume !== '' || f.exportable !== false || f.contextUsage !== null)
-      throw new Error('folder-only card fields wrong');
+      || f.projectPath !== '/tmp/proj-x' || f.resume !== '' || 'exportable' in f || f.contextUsage !== null)
+      throw new Error('folder-only card fields wrong (exportable gate must be gone since F3)');
     if (!(f.mtimeMs > 0)) throw new Error('folder-only mtime should come from subagent');
     const ix = byId[IDX];
     if (ix.mtimeMs !== Date.parse('2026-01-02T03:04:05.000Z') || ix.lastActivity !== '2026-01-02T03:04:05.000Z'
@@ -1002,7 +1240,7 @@ await acheck('claude list (F2): one card per identity, recovered cards, opaque r
     if (thirdIds.includes(IDX) || thirdIds.includes(IDXBAD))
       throw new Error('deleted index should drop index-only cards');
     const thirdFold = out.third.entries.find((e) => e.id === FOLD);
-    if (!thirdFold || thirdFold.title !== '(untitled)' || thirdFold.exportable !== false)
+    if (!thirdFold || thirdFold.title !== '(untitled)' || 'exportable' in thirdFold)
       throw new Error('folder-only card should survive index deletion via its subagents');
   } finally {
     fs.rmSync(tempHome, { recursive: true, force: true });
@@ -1233,9 +1471,13 @@ check('buildQuery: full excludes its four constituents (no 400 for codex sidecha
   const q = parseQ(buildExportQuery({ source: 'codex', ref: '/r', opts: { full: true, sidechains: true, tools: true }, capabilities: CODEX_CAPS }));
   return q.get('full') === '1' && !q.has('sidechains') && !q.has('tools') && !q.has('toolResults') && !q.has('thinking');
 });
-check('buildQuery: claude history="on" (unavailable) is dropped', () => {
-  const q = parseQ(buildExportQuery({ source: 'claude', ref: '/r', opts: { history: 'on' }, capabilities: CLAUDE_CAPS }));
+check('buildQuery: history="on" dropped when unavailable (synthetic 1A caps)', () => {
+  const q = parseQ(buildExportQuery({ source: 'claude', ref: '/r', opts: { history: 'on' }, capabilities: { ...CLAUDE_CAPS, history: 'unavailable' } }));
   return !q.has('history');
+});
+check('buildQuery: claude history="on" sent since F3 (supported)', () => {
+  const q = parseQ(buildExportQuery({ source: 'claude', ref: '/r', opts: { history: 'on' }, capabilities: CLAUDE_CAPS }));
+  return q.get('history') === 'on';
 });
 check('buildQuery: codex notApplicable flags dropped, supported kept', () => {
   const q = parseQ(buildExportQuery({ source: 'codex', ref: '/r', opts: { verbatim: true, embedImages: true, thinking: true, raw: true }, capabilities: CODEX_CAPS }));

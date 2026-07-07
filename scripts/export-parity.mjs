@@ -5,11 +5,21 @@
 //
 // Usage:
 //   node scripts/export-parity.mjs <source> <ref.jsonl> [<ref2.jsonl> ...]
+//   node scripts/export-parity.mjs claude v1:<projectSlug>:<sessionId>   # bundle mode (F3)
 //   EXTRACT_PY=/path/to/extract-session.py node scripts/export-parity.mjs codex <ref>
 //
-// `ref` must be an absolute path to the transcript (passed to BOTH the Python
-// extractor and the JS adapter, so resolution is identical and unambiguous).
-// Exits non-zero if any combination differs.
+// `ref` is an absolute path to the transcript (passed to BOTH the Python
+// extractor and the JS adapter, so resolution is identical: the reference's
+// direct-file branch, main-only). For Claude, an opaque `v1:<slug>:<id>` ref
+// selects BUNDLE mode: the JS side resolves the full bundle (main + subagents
+// + index) and the Python side receives the bare session id, hitting its
+// UUID-search branch — the same bundle. Claude refs also run history combos
+// (--history / --no-history / auto); because both sides read the LIVE
+// ~/.claude/history.jsonl sequentially, run history-sensitive parity under a
+// snapshot HOME (copy the project dir + history.jsonl into a temp HOME, set
+// HOME for both sides, pass EXTRACT_PY explicitly) — a prompt landing between
+// the two runs would produce a false diff. Exits non-zero if any combination
+// differs.
 //
 // Pinned reference sessions (see handoff / ADRs):
 //   codex : ~/.codex/sessions/2026/06/30/rollout-*-019f1a6e-*.jsonl  (39 turns)
@@ -35,8 +45,9 @@ const PY = process.env.EXTRACT_PY
   || `${os.homedir()}/projects/claude-session-tools/plugins/session-tools/scripts/extract-session.py`;
 
 // Flag matrix as JS opts; the Python flags are DERIVED from these so the two
-// sides can't drift. NOTE: no `--history` combos — history backfill is 1B
-// (ADR-0012); a live main transcript resolves history=off on both sides.
+// sides can't drift. Claude refs additionally run HISTORY_COMBOS (F3): both
+// sides resolve the tri-state identically (explicit on/off, else auto →
+// folder-only), so absent-history combos stay valid on every session era.
 const MATRIX = [
   { label: 'default', opts: {} },
   { label: 'full', opts: { full: true } },
@@ -64,8 +75,33 @@ function optsToPyFlags(o) {
   if (o.verbatim) f.push('--verbatim');
   if (o.raw) f.push('--raw');
   if (o.embedImages) f.push('--embed-images');
+  if (o.history === 'on') f.push('--history');
+  else if (o.history === 'off') f.push('--no-history');
   if (o.maxChars && o.maxChars !== 400) f.push('--max-chars', String(o.maxChars));
   return f;
+}
+
+const HISTORY_COMBOS = [
+  { label: 'full+history', opts: { full: true, history: 'on' } },
+  { label: 'full+no-history', opts: { full: true, history: 'off' } },
+  { label: 'default+history', opts: { history: 'on' } },
+];
+
+// Opaque claude ref → the bare session id for the Python side (its UUID-search
+// branch resolves the same bundle the JS resolver does). Bundle mode requires
+// the FULL `v1:<slug>:<id>` form: a bare UUID would reach the JS adapter as a
+// relative path ref and fail containment with a misleading error, so reject it
+// up front (Codex F3 review Minor).
+function pyRef(src, ref) {
+  if (src === 'claude') {
+    const m = /^v1:[A-Za-z0-9._-]+:([A-Za-z0-9._-]+)$/.exec(ref);
+    if (m) return m[1];
+    if (!ref.startsWith('/')) {
+      console.error(`error: claude ref must be an absolute path or a full opaque ref (v1:<projectSlug>:<sessionId>), got: ${ref}`);
+      process.exit(2);
+    }
+  }
+  return ref;
 }
 
 // Use the endpoint's SOURCE-EFFECTIVE stage verbatim (export.js sourceEffectiveOptions:
@@ -103,8 +139,9 @@ if (!source || refs.length === 0) {
 let failures = 0;
 for (const ref of refs) {
   console.log(`\n=== ${source} :: ${ref} ===`);
-  for (const { label, opts: combo } of MATRIX) {
-    const py = execFileSync('python3', [PY, ref, ...optsToPyFlags(combo)], { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 });
+  const combos = source === 'claude' ? [...MATRIX, ...HISTORY_COMBOS] : MATRIX;
+  for (const { label, opts: combo } of combos) {
+    const py = execFileSync('python3', [PY, pyRef(source, ref), ...optsToPyFlags(combo)], { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 });
     const o = resolveOpts(source, combo);
     const { meta, events, resolvedOpts } = await collectEvents(source, ref, o);
     const js = renderMarkdown(events, meta, resolvedOpts || o); // mirror endpoint's final opts
