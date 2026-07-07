@@ -1,8 +1,7 @@
 #!/usr/bin/env node
 // Golden-diff harness: assert ASM's JS export is byte-for-byte identical to
 // /session-tools:replay (extract-session.py) across a flag matrix, per ADR-0010
-// (docs/adr-markdown-export-2026-07-01.md). Two-format: works for `codex` today,
-// and for `claude` once server/sources/claude.js gains collectEvents.
+// (docs/adr-markdown-export-2026-07-01.md). Two-format: `codex` and `claude`.
 //
 // Usage:
 //   node scripts/export-parity.mjs <source> <ref.jsonl> [<ref2.jsonl> ...]
@@ -17,8 +16,9 @@
 //           ~/.codex/sessions/2026/06/11/rollout-*-019eb994-*.jsonl  (images: [] + local_images)
 //   claude: ~/.claude/projects/-Users-rymalia-projects/0af8a8ed-51cd-44f8-8afb-9dbd7f1d6337.jsonl
 //           (text + 1 image + 32 thinking + 26 tool_use + 26 tool_result; NO index
-//            entry — which is the normal case: 0 of 8420 live transcripts are in
-//            any sessions-index.json, so index enrichment is a 1B-only concern.)
+//            entry — still the common case locally: 0 of 8420 live transcripts are
+//            in any sessions-index.json. Index enrichment (ADR-0015) is covered by
+//            the staged scripts/fixtures/claude-index-enrichment.* smoke check.)
 
 import { execFileSync } from 'node:child_process';
 import os from 'node:os';

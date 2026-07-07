@@ -1,0 +1,28 @@
+{
+  "version": 1,
+  "entries": [
+    {
+      "sessionId": "aaaaaaaa-0000-4000-8000-000000000000",
+      "firstPrompt": "decoy first prompt",
+      "summary": "Decoy entry that must never match",
+      "messageCount": 99,
+      "created": "2026-01-01T00:00:00.000Z",
+      "modified": "2026-01-01T01:00:00.000Z",
+      "gitBranch": "decoy-branch",
+      "isSidechain": false
+    },
+    {
+      "sessionId": "c1a0de00-1111-4222-8333-444455556666",
+      "fullPath": "/Users/test/.claude/projects/-Users-test-project/c1a0de00-1111-4222-8333-444455556666.jsonl",
+      "fileMtime": 1767607215000,
+      "firstPrompt": "MUST-NOT-RENDER first prompt",
+      "summary": "Index enrichment fixture session",
+      "messageCount": 4,
+      "created": "2026-01-05T09:59:58.000Z",
+      "modified": "2026-01-05T10:00:15.000Z",
+      "gitBranch": "fixture-branch",
+      "projectPath": "/Users/test/project",
+      "isSidechain": false
+    }
+  ]
+}

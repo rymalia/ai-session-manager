@@ -164,12 +164,33 @@ export async function detail(ref, lastN = 30) {
 // Conversion is flag-independent — EVERYTHING is emitted; the renderer filters.
 // This reproduces `/replay <id> --full` byte-for-byte.
 //
-// Scope: 1A — the top-level `<id>.jsonl` main transcript ONLY. No subagents /
-// history.jsonl / folder-only / sessions-index.json recovery (that is Phase 1B,
-// ADR-0012, which also needs list() + a stable ref format). An audit found 0 of
-// 8420 live transcripts have an index entry, so 1A never triggers the index
-// header-enrichment lines — a naive collectEvents byte-matches /replay.
+// Scope: 1A — the top-level `<id>.jsonl` main transcript, with header metadata
+// enriched from the project-slug dir's sessions-index.json when an entry
+// matches (ADR-0015; /replay's direct-path branch calls
+// load_session_index(p.parent, p.stem)). No subagents / history.jsonl /
+// folder-only / index-only recovery (that is Phase 1B, ADR-0012, which also
+// needs list() + a stable ref format).
 // ---------------------------------------------------------------------------
+
+// Port of load_session_index (extract-session.py): read sessions-index.json
+// beside the transcript and return the first entry whose sessionId matches,
+// else null. Missing/unreadable/unparseable file → null (Python catches
+// JSONDecodeError/OSError). One deliberate error-path divergence: Python
+// raises an uncaught AttributeError on a structurally invalid index (non-dict
+// root, non-dict entries); we treat those as "no index". Tolerance only — it
+// never changes rendered bytes, so it is a code-level note, not an ADR-0009
+// enumerated exception (that list covers rendered-output divergences).
+async function loadSessionIndex(projectDir, sessionId) {
+  let data;
+  try {
+    data = JSON.parse(await fs.promises.readFile(path.join(projectDir, 'sessions-index.json'), 'utf-8'));
+  } catch { return null; }
+  if (!data || typeof data !== 'object' || Array.isArray(data) || !Array.isArray(data.entries)) return null;
+  for (const e of data.entries) {
+    if (e && typeof e === 'object' && !Array.isArray(e) && e.sessionId === sessionId) return e;
+  }
+  return null;
+}
 
 // Extract tool_result text from a user message's content list, mirroring
 // extract_user_tool_results: string content → one entry; list content → each
@@ -197,6 +218,16 @@ function userToolResults(message) {
 export async function collectEvents(ref, _opts = {}) {
   const resolved = path.resolve(ref);
   if (!isInside(resolved, ROOT)) throw new Error('forbidden');
+  const sessionId = path.basename(resolved).replace(/\.jsonl$/, '');
+
+  // Live-main index enrichment (ADR-0015): only the four fields the renderer's
+  // header emits — firstPrompt/modified exist in index entries but /replay
+  // never renders them, so they stay out of the meta contract. Falsey values
+  // pass through; renderMarkdown suppresses them exactly like the Python
+  // truthiness checks. Loaded BEFORE the readline interface exists: awaiting
+  // between createInterface and the for-await loop would let 'line' events
+  // fire with no consumer attached and starve the iterator.
+  const idx = await loadSessionIndex(path.dirname(resolved), sessionId);
 
   const rl = readline.createInterface({
     input: fs.createReadStream(resolved, { encoding: 'utf-8' }),
@@ -207,9 +238,14 @@ export async function collectEvents(ref, _opts = {}) {
   const cwdCandidates = []; // { ts, cwd } across ALL records — mirrors main()'s post-sort cwd scan
   const meta = {
     source, isCodex: false, mainPath: resolved,
-    sessionId: path.basename(resolved).replace(/\.jsonl$/, ''),
-    cwd: null, historyOn: false,
+    sessionId, cwd: null, historyOn: false,
   };
+  if (idx) {
+    meta.summary = idx.summary;
+    meta.created = idx.created;
+    meta.gitBranch = idx.gitBranch;
+    meta.messageCount = idx.messageCount;
+  }
   const emit = (role, ts, blocks, extra = {}) =>
     events.push({ role, ts: ts || '', source: 'main', ...extra, blocks });
 

@@ -357,6 +357,126 @@ await acheck('codex export: empty images falls back to local_images', async () =
   }
 });
 
+// (6b) Claude live-main index enrichment (ADR-0015): a synthetic main
+// transcript staged BESIDE an overlapping sessions-index.json — the fixture
+// ADR-0015 requires. Golden-diffed against the Python reference across the
+// full flag matrix. Runs in a CHILD process because claude.js captures
+// ROOT from os.homedir() at import time — mutating HOME in this process
+// cannot re-point the containment root.
+const CLAUDE_IDX_SESSION = 'c1a0de00-1111-4222-8333-444455556666';
+const stageClaudeProject = (tempHome, slug, { index } = {}) => {
+  const proj = path.join(tempHome, '.claude', 'projects', slug);
+  fs.mkdirSync(proj, { recursive: true });
+  const staged = path.join(proj, `${CLAUDE_IDX_SESSION}.jsonl`);
+  fs.copyFileSync(
+    fileURLToPath(new URL('./fixtures/claude-index-enrichment.jsonl', import.meta.url)),
+    staged,
+  );
+  if (index !== undefined) fs.writeFileSync(path.join(proj, 'sessions-index.json'), index);
+  return staged;
+};
+
+await acheck('claude export: index enrichment golden diff (ADR-0015)', async () => {
+  const tempHome = fs.mkdtempSync(path.join(os.tmpdir(), 'asm-claude-index-'));
+  try {
+    const staged = stageClaudeProject(tempHome, '-Users-test-project', {
+      index: fs.readFileSync(
+        fileURLToPath(new URL('./fixtures/claude-index-enrichment-sessions-index.json', import.meta.url)),
+      ),
+    });
+    execFileSync(
+      process.execPath,
+      [fileURLToPath(new URL('./export-parity.mjs', import.meta.url)), 'claude', staged],
+      {
+        env: {
+          ...process.env,
+          HOME: tempHome,
+          EXTRACT_PY: process.env.EXTRACT_PY
+            || path.join(os.homedir(), 'projects', 'claude-session-tools', 'plugins', 'session-tools', 'scripts', 'extract-session.py'),
+        },
+        encoding: 'utf8',
+      },
+    );
+  } finally {
+    fs.rmSync(tempHome, { recursive: true, force: true });
+  }
+});
+
+// (6c) Hermetic index-enrichment variants (no Python needed): run the real
+// adapter + renderer in a child Node process (same HOME-at-import constraint
+// as above) and assert the adapter→renderer contract for each boundary.
+await acheck('claude export: index enrichment variants (match/none/no-match/invalid/falsey)', async () => {
+  const tempHome = fs.mkdtempSync(path.join(os.tmpdir(), 'asm-claude-index-'));
+  try {
+    const runExport = (ref) => JSON.parse(execFileSync(
+      process.execPath,
+      ['--input-type=module', '-e', `
+        const [ref, adapterUrl, exportUrl] = process.argv.slice(1);
+        const { collectEvents } = await import(adapterUrl);
+        const { renderMarkdown } = await import(exportUrl);
+        const { meta, events } = await collectEvents(ref);
+        process.stdout.write(JSON.stringify({
+          summary: meta.summary ?? null, created: meta.created ?? null,
+          gitBranch: meta.gitBranch ?? null,
+          messageCount: meta.messageCount ?? null,
+          md: renderMarkdown(events, meta, {}),
+        }));
+      `,
+        ref,
+        new URL('../server/sources/claude.js', import.meta.url).href,
+        new URL('../server/export.js', import.meta.url).href,
+      ],
+      { env: { ...process.env, HOME: tempHome }, encoding: 'utf8' },
+    ));
+    const HEADER_LINES = ['- **summary**: ', '- **created**: ', '- **branch**: ', '- **original messages**: '];
+    const assertNoIndexLines = (j, label) => {
+      for (const l of HEADER_LINES) if (j.md.includes(l)) throw new Error(`${label}: unexpected "${l.trim()}" line`);
+    };
+
+    // Matching entry → all four fields populate and render, in /replay's order.
+    const match = runExport(stageClaudeProject(tempHome, '-proj-match', {
+      index: fs.readFileSync(
+        fileURLToPath(new URL('./fixtures/claude-index-enrichment-sessions-index.json', import.meta.url)),
+      ),
+    }));
+    if (match.summary !== 'Index enrichment fixture session') throw new Error('summary not populated from index');
+    if (match.created !== '2026-01-05T09:59:58.000Z') throw new Error('created not taken from index');
+    if (match.gitBranch !== 'fixture-branch' || match.messageCount !== 4) throw new Error('branch/messageCount not populated');
+    if (!/- \*\*created\*\*: \d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\n/.test(match.md)) throw new Error('created line missing/malformed');
+    const order = [
+      '- **summary**: Index enrichment fixture session\n', '- **main**: ',
+      '- **cwd**: ', '- **created**: ', '- **branch**: fixture-branch\n',
+      '- **original messages**: 4\n', '- **turns**: ',
+    ].map((s) => match.md.indexOf(s));
+    if (order.some((i) => i === -1)) throw new Error('expected header line missing');
+    if (order.some((i, n) => n > 0 && i < order[n - 1])) throw new Error('header lines out of /replay order');
+    if (match.md.includes('MUST-NOT-RENDER') || match.md.includes('- **modified**')) throw new Error('non-rendered index fields leaked');
+
+    // No index file at all → nothing enriched.
+    assertNoIndexLines(runExport(stageClaudeProject(tempHome, '-proj-none')), 'no index');
+    // Index present, no matching sessionId → nothing enriched.
+    assertNoIndexLines(runExport(stageClaudeProject(tempHome, '-proj-nomatch', {
+      index: JSON.stringify({ version: 1, entries: [{ sessionId: 'other', summary: 'nope' }] }),
+    })), 'no match');
+    // Malformed JSON → treated as no index (Python catches JSONDecodeError).
+    assertNoIndexLines(runExport(stageClaudeProject(tempHome, '-proj-malformed', { index: '{not json' })), 'malformed');
+    // Structurally invalid (array root) → treated as no index; the tolerant
+    // error-path divergence documented in claude.js loadSessionIndex.
+    assertNoIndexLines(runExport(stageClaudeProject(tempHome, '-proj-structural', { index: '[]' })), 'structural');
+    // Matching entry with falsey fields → populated but suppressed by the
+    // renderer's truthiness checks, mirroring Python's `if idx.field:`.
+    const falsey = runExport(stageClaudeProject(tempHome, '-proj-falsey', {
+      index: JSON.stringify({ version: 1, entries: [{
+        sessionId: CLAUDE_IDX_SESSION, summary: '', created: '', gitBranch: '', messageCount: 0,
+      }] }),
+    }));
+    if (falsey.messageCount !== 0) throw new Error('falsey fields should still populate meta');
+    assertNoIndexLines(falsey, 'falsey fields');
+  } finally {
+    fs.rmSync(tempHome, { recursive: true, force: true });
+  }
+});
+
 // (7) isMeta user turns are suppressed unless --verbatim.
 await acheck('render: isMeta user suppressed unless verbatim', async () => {
   const ev = { role: 'user', ts: '', source: 'main', meta: true, blocks: [{ kind: 'text', text: 'command body' }] };
