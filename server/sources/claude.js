@@ -1,13 +1,12 @@
 // Claude Code: ~/.claude/projects/<encoded-cwd>/<sessionId>.jsonl
 // Every line is one record (user / assistant / meta).
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 import readline from 'node:readline';
 import { makeEntry, cdPrefix, clip, toolUseLine, toolResultLine, thinkingLine, isInside } from './_shared.js';
 import { createClaudeContextTracker } from '../contextUsage.js';
+import { ROOT, decodeClaudeRef, resolveBundle, loadSessionIndex } from './claudeBundle.js';
 
-const ROOT = path.join(os.homedir(), '.claude', 'projects');
 export const source = 'claude';
 
 // Phase-accurate export capabilities (ADR-0013). Tri-value:
@@ -143,9 +142,33 @@ export async function list() {
   return out;
 }
 
-export async function detail(ref, lastN = 30) {
+// Dual-scheme ref acceptance (ADR-0017, F1). Opaque `v1:<slug>:<id>` refs are
+// discriminated by their scheme prefix (decodeClaudeRef → null for anything
+// else — no sniffing) and resolved through the bundle resolver; every other
+// ref is the legacy absolute-path form, handled byte-for-byte as before.
+// In F1 an opaque ref requires a surviving MAIN transcript: folder-only /
+// index-only sessions have no detail/export path until the 1B converter (F3),
+// so they map to 'not_found' (→ 404), distinct from containment's 'forbidden'
+// (→ 403). list() still emits path refs; the flip to opaque emission happens
+// with one-card-per-identity in F2.
+async function resolveRefToMainPath(ref) {
+  const identity = decodeClaudeRef(ref);
+  if (identity) {
+    const bundle = await resolveBundle(identity);
+    if (!bundle || !bundle.mainPath) {
+      const e = new Error('not found');
+      e.code = 'not_found';
+      throw e;
+    }
+    return bundle.mainPath;
+  }
   const resolved = path.resolve(ref);
   if (!isInside(resolved, ROOT)) throw new Error('forbidden');
+  return resolved;
+}
+
+export async function detail(ref, lastN = 30) {
+  const resolved = await resolveRefToMainPath(ref);
   const { summary, messages } = await readSession(resolved, { wantMessages: true, lastN });
   const id = path.basename(resolved).replace(/\.jsonl$/, '');
   const cwd = summary.cwd || '';
@@ -172,25 +195,9 @@ export async function detail(ref, lastN = 30) {
 // needs list() + a stable ref format).
 // ---------------------------------------------------------------------------
 
-// Port of load_session_index (extract-session.py): read sessions-index.json
-// beside the transcript and return the first entry whose sessionId matches,
-// else null. Missing/unreadable/unparseable file → null (Python catches
-// JSONDecodeError/OSError). One deliberate error-path divergence: Python
-// raises an uncaught AttributeError on a structurally invalid index (non-dict
-// root, non-dict entries); we treat those as "no index". Tolerance only — it
-// never changes rendered bytes, so it is a code-level note, not an ADR-0009
-// enumerated exception (that list covers rendered-output divergences).
-async function loadSessionIndex(projectDir, sessionId) {
-  let data;
-  try {
-    data = JSON.parse(await fs.promises.readFile(path.join(projectDir, 'sessions-index.json'), 'utf-8'));
-  } catch { return null; }
-  if (!data || typeof data !== 'object' || Array.isArray(data) || !Array.isArray(data.entries)) return null;
-  for (const e of data.entries) {
-    if (e && typeof e === 'object' && !Array.isArray(e) && e.sessionId === sessionId) return e;
-  }
-  return null;
-}
+// loadSessionIndex (the load_session_index port, incl. the structural-
+// tolerance divergence note) lives in claudeBundle.js since F1 — the bundle
+// resolver and this collector share it.
 
 // Extract tool_result text from a user message's content list, mirroring
 // extract_user_tool_results: string content → one entry; list content → each
@@ -216,8 +223,7 @@ function userToolResults(message) {
 // the Codex adapter, conversion keeps every event; filtering is render-time.
 // history.jsonl backfill (the one collect-time flag) is Phase 1B, not here.
 export async function collectEvents(ref, _opts = {}) {
-  const resolved = path.resolve(ref);
-  if (!isInside(resolved, ROOT)) throw new Error('forbidden');
+  const resolved = await resolveRefToMainPath(ref);
   const sessionId = path.basename(resolved).replace(/\.jsonl$/, '');
 
   // Live-main index enrichment (ADR-0015): only the four fields the renderer's

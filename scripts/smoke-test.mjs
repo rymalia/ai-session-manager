@@ -14,6 +14,8 @@ import { renderMarkdown, truncate, deriveContentDisposition, deriveFlagTokens, d
 import { parseClaudeUsage, finalizeContextUsage, createClaudeContextTracker } from '../server/contextUsage.js';
 import { apiMiddleware } from '../vite.config.js';
 import { normalizeExportOpts, buildExportQuery, clampMaxChars, DEFAULT_EXPORT_OPTS } from '../src/exportOptions.js';
+import { encodeClaudeRef, decodeClaudeRef, resolveBundle } from '../server/sources/claudeBundle.js';
+import { decodeStarred, encodeStarred } from '../src/starred.js';
 
 let pass = 0;
 const fails = [];
@@ -586,6 +588,205 @@ await acheck('claude export: render-edges golden diff (unicode/image/ts/boundary
     fs.rmSync(tempHome, { recursive: true, force: true });
   }
 });
+
+// (6e) F1 identity layer (ADR-0017): opaque ref codec, bundle resolver,
+// dual-scheme ref acceptance, endpoint 404 mapping, versioned star storage.
+// No 1B parsing is exercised here — resolver/identity only (ADR-0012 gate).
+
+// Codec: pure string work, no fs — safe to test in-process.
+check('claude ref codec: roundtrip', (() => {
+  const id = { projectSlug: '-Users-test-proj.1_x', sessionId: 'c1a0de00-1111-4222-8333-444455556666' };
+  const d = decodeClaudeRef(encodeClaudeRef(id));
+  return d && d.projectSlug === id.projectSlug && d.sessionId === id.sessionId;
+})());
+check('claude ref codec: rejects malformed/traversal refs', (() => {
+  const bad = [
+    'v2:a:b', 'v1:a', 'v1:a:b:c', 'v1::b', 'v1:a:', 'v1:.:b', 'v1:..:b',
+    'v1:a:..', 'v1:a/b:c', 'v1:a\\b:c', 'v1:a b:c', 'v1:a:b ',
+    'v1:é:b', '/etc/passwd', '', null, undefined, 42,
+  ];
+  return bad.every((r) => decodeClaudeRef(r) === null);
+})());
+check('claude ref codec: encode throws on invalid identity', (() => {
+  for (const id of [{ projectSlug: '..', sessionId: 'x' }, { projectSlug: 'a', sessionId: 'b/c' }]) {
+    try { encodeClaudeRef(id); return false; } catch { /* good */ }
+  }
+  return true;
+})());
+await acheck('claude ref codec: __proto__ slug decodes clean and resolves to null', async () => {
+  const d = decodeClaudeRef('v1:__proto__:00000000-0000-4000-8000-00000000f1f1');
+  if (!d || d.projectSlug !== '__proto__') throw new Error('charset-valid slug should decode');
+  if (Object.prototype.polluted !== undefined) throw new Error('prototype polluted');
+  // Real ROOT, read-only: no such session dir → not a bundle.
+  if (await resolveBundle(d) !== null) throw new Error('expected null bundle');
+});
+
+// Resolver: artifact-era matrix in a CHILD process (claudeBundle.js captures
+// ROOT from os.homedir() at import time, same constraint as claude.js).
+await acheck('claude bundle resolver: era matrix + composite signature', async () => {
+  const tempHome = fs.mkdtempSync(path.join(os.tmpdir(), 'asm-claude-f1-'));
+  try {
+    const proj = (slug) => {
+      const p = path.join(tempHome, '.claude', 'projects', slug);
+      fs.mkdirSync(p, { recursive: true });
+      return p;
+    };
+    let p = proj('-f1-main-only');
+    fs.writeFileSync(path.join(p, 's1.jsonl'), '{}\n');
+    p = proj('-f1-full');
+    fs.writeFileSync(path.join(p, 's1.jsonl'), '{}\n');
+    fs.mkdirSync(path.join(p, 's1', 'subagents'), { recursive: true });
+    fs.writeFileSync(path.join(p, 's1', 'subagents', 'agent-b.jsonl'), '{}\n');
+    fs.writeFileSync(path.join(p, 's1', 'subagents', 'agent-a.jsonl'), '{}\n');
+    p = proj('-f1-folder-only');
+    fs.mkdirSync(path.join(p, 's1', 'subagents'), { recursive: true });
+    fs.writeFileSync(path.join(p, 's1', 'subagents', 'agent-x.jsonl'), '{}\n');
+    p = proj('-f1-index-only');
+    fs.writeFileSync(path.join(p, 'sessions-index.json'),
+      JSON.stringify({ version: 1, entries: [{ sessionId: 's1', summary: 'from-index' }] }));
+    p = proj('-f1-empty-folder');
+    fs.mkdirSync(path.join(p, 's1'), { recursive: true });
+
+    const CASES = ['-f1-main-only', '-f1-full', '-f1-folder-only', '-f1-index-only', '-f1-empty-folder', '-f1-missing'];
+    const run = () => JSON.parse(execFileSync(
+      process.execPath,
+      ['--input-type=module', '-e', `
+        const [bundleUrl, ...slugs] = process.argv.slice(1);
+        const { resolveBundle } = await import(bundleUrl);
+        const out = [];
+        for (const projectSlug of slugs) {
+          const b = await resolveBundle({ projectSlug, sessionId: 's1' });
+          out.push(b && {
+            main: !!b.mainPath, folder: !!b.folderPath,
+            subs: b.subagentPaths.map((f) => f.split('/').pop()),
+            idx: b.indexMeta ? b.indexMeta.summary : null,
+            sig: b.compositeSignature,
+          });
+        }
+        process.stdout.write(JSON.stringify(out));
+      `,
+        new URL('../server/sources/claudeBundle.js', import.meta.url).href,
+        ...CASES,
+      ],
+      { env: { ...process.env, HOME: tempHome }, encoding: 'utf8' },
+    ));
+
+    const [mainOnly, full, folderOnly, indexOnly, emptyFolder, missing] = run();
+    if (!mainOnly || !mainOnly.main || mainOnly.folder || mainOnly.subs.length || mainOnly.idx)
+      throw new Error('main-only bundle wrong shape');
+    if (!full || !full.main || !full.folder || full.subs.join(',') !== 'agent-a.jsonl,agent-b.jsonl')
+      throw new Error('full bundle wrong shape or subagents not lexically sorted');
+    if (!folderOnly || folderOnly.main || folderOnly.subs.join(',') !== 'agent-x.jsonl')
+      throw new Error('folder-only bundle wrong shape');
+    if (!indexOnly || indexOnly.main || indexOnly.folder || indexOnly.subs.length || indexOnly.idx !== 'from-index')
+      throw new Error('index-only bundle wrong shape');
+    if (emptyFolder !== null) throw new Error('bare empty folder must be "nothing to replay" (null)');
+    if (missing !== null) throw new Error('missing session must resolve to null');
+
+    // Composite signature: stable across identical runs; changes when ANY
+    // artifact changes (here: a subagent file, invisible to main-file mtime).
+    const again = run();
+    if (again[1].sig !== full.sig) throw new Error('signature not stable across identical calls');
+    if (again[0].sig !== mainOnly.sig) throw new Error('main-only signature not stable');
+    fs.appendFileSync(path.join(tempHome, '.claude', 'projects', '-f1-full', 's1', 'subagents', 'agent-a.jsonl'), '{}\n');
+    const mutated = run();
+    if (mutated[1].sig === full.sig) throw new Error('signature must change when a subagent changes');
+    if (mutated[0].sig !== mainOnly.sig) throw new Error('unrelated bundle signature must not change');
+    // Main-transcript and index-file mutations must move the signature too —
+    // pinning the FULL artifact set the signature contract documents (Codex
+    // impl-review Info: subagent-only mutation left these unpinned).
+    fs.appendFileSync(path.join(tempHome, '.claude', 'projects', '-f1-full', 's1.jsonl'), '{}\n');
+    fs.writeFileSync(path.join(tempHome, '.claude', 'projects', '-f1-index-only', 'sessions-index.json'),
+      JSON.stringify({ version: 1, entries: [{ sessionId: 's1', summary: 'from-index', modified: 'x' }] }));
+    const mutated2 = run();
+    if (mutated2[1].sig === mutated[1].sig) throw new Error('signature must change when the main transcript changes');
+    if (mutated2[3].sig === indexOnly.sig) throw new Error('signature must change when sessions-index.json changes');
+  } finally {
+    fs.rmSync(tempHome, { recursive: true, force: true });
+  }
+});
+
+// Dual-scheme acceptance: the SAME session through a path ref and an opaque
+// ref must be byte-identical (export) and deep-equal (detail); a folder-only
+// identity has no main transcript in F1 → code 'not_found'.
+await acheck('claude dual-scheme refs: opaque ≡ path; folder-only → not_found', async () => {
+  const tempHome = fs.mkdtempSync(path.join(os.tmpdir(), 'asm-claude-f1dual-'));
+  try {
+    const staged = stageClaudeProject(tempHome, '-f1-dual');
+    const foDir = path.join(tempHome, '.claude', 'projects', '-f1-dual', 'fo11de00-1111-4222-8333-444455556666', 'subagents');
+    fs.mkdirSync(foDir, { recursive: true });
+    fs.writeFileSync(path.join(foDir, 'agent-a.jsonl'), '{}\n');
+
+    const out = JSON.parse(execFileSync(
+      process.execPath,
+      ['--input-type=module', '-e', `
+        const [pathRef, opaqueRef, foRef, adapterUrl, exportUrl] = process.argv.slice(1);
+        const claude = await import(adapterUrl);
+        const { renderMarkdown } = await import(exportUrl);
+        const a = await claude.collectEvents(pathRef);
+        const b = await claude.collectEvents(opaqueRef);
+        const mdA = renderMarkdown(a.events, a.meta, { full: true });
+        const mdB = renderMarkdown(b.events, b.meta, { full: true });
+        const dA = JSON.stringify(await claude.detail(pathRef, 10));
+        const dB = JSON.stringify(await claude.detail(opaqueRef, 10));
+        let foCode = null;
+        try { await claude.collectEvents(foRef); } catch (e) { foCode = e.code || e.message; }
+        process.stdout.write(JSON.stringify({ sameMd: mdA === mdB, mdLen: mdA.length, sameDetail: dA === dB, foCode }));
+      `,
+        staged,
+        `v1:-f1-dual:${CLAUDE_IDX_SESSION}`,
+        'v1:-f1-dual:fo11de00-1111-4222-8333-444455556666',
+        new URL('../server/sources/claude.js', import.meta.url).href,
+        new URL('../server/export.js', import.meta.url).href,
+      ],
+      { env: { ...process.env, HOME: tempHome }, encoding: 'utf8' },
+    ));
+    if (!out.sameMd || out.mdLen === 0) throw new Error('opaque-ref export differs from path-ref export');
+    if (!out.sameDetail) throw new Error('opaque-ref detail differs from path-ref detail');
+    if (out.foCode !== 'not_found') throw new Error(`folder-only opaque ref: expected code 'not_found', got ${out.foCode}`);
+  } finally {
+    fs.rmSync(tempHome, { recursive: true, force: true });
+  }
+});
+
+// Endpoint mapping: a decoded-but-absent opaque identity is client input →
+// 404 on BOTH ref-consuming endpoints (real ROOT, read-only, no staging;
+// sibling containment keeps asserting 403 above per ADR-0011).
+const F1_MISSING_REF = 'v1:-f1-no-such-slug:00000000-0000-4000-8000-00000000dead';
+await acheck('conversation endpoint: missing opaque identity → 404', async () => {
+  const res = await callApi(`/api/conversation?source=claude&ref=${encodeURIComponent(F1_MISSING_REF)}`);
+  if (res.statusCode !== 404) throw new Error(`expected 404, got ${res.statusCode}`);
+});
+await acheck('export endpoint: missing opaque identity → 404 + no-store', async () => {
+  const res = await callApi(`/api/export?source=claude&ref=${encodeURIComponent(F1_MISSING_REF)}&full=1`);
+  if (res.statusCode !== 404) throw new Error(`expected 404, got ${res.statusCode}`);
+  if (res.getHeader('cache-control') !== 'no-store') throw new Error('missing Cache-Control: no-store');
+});
+
+// Versioned star storage (src/starred.js): envelope precedence, one-shot
+// migration, fail-closed parsing.
+check('starred: legacy array migrates once into the v1 envelope', (() => {
+  const first = decodeStarred(null, JSON.stringify(['claude:/a', 'codex:/b']));
+  if (first.keys.join(',') !== 'claude:/a,codex:/b' || !first.needsWrite) return false;
+  const second = decodeStarred(encodeStarred(first.keys), JSON.stringify(['claude:/a', 'codex:/b']));
+  return second.keys.join(',') === 'claude:/a,codex:/b' && !second.needsWrite;
+})());
+check('starred: valid envelope wins over legacy', () =>
+  decodeStarred(encodeStarred(['new:key']), JSON.stringify(['old:key'])).keys.join(',') === 'new:key');
+check('starred: malformed/wrong-version envelope falls back to legacy', (() => {
+  const legacy = JSON.stringify(['a:b']);
+  return ['{not json', JSON.stringify({ version: 2, keys: ['x'] }), JSON.stringify({ keys: ['x'] }),
+    JSON.stringify({ version: 1, keys: 'x' }), JSON.stringify(['bare-array'])]
+    .every((v1) => { const r = decodeStarred(v1, legacy); return r.keys.join(',') === 'a:b' && r.needsWrite; });
+})());
+check('starred: everything malformed → empty, never throws', (() => {
+  const r = decodeStarred('{bad', '{worse');
+  const empty = decodeStarred(null, null);
+  return r.keys.length === 0 && r.needsWrite && empty.keys.length === 0 && empty.needsWrite;
+})());
+check('starred: non-string members are filtered', () =>
+  decodeStarred(null, JSON.stringify(['ok', 42, null, 'also'])).keys.join(',') === 'ok,also'
+  && decodeStarred(JSON.stringify({ version: 1, keys: ['ok', {}, 'also'] }), null).keys.join(',') === 'ok,also');
 
 // (7) isMeta user turns are suppressed unless --verbatim.
 await acheck('render: isMeta user suppressed unless verbatim', async () => {

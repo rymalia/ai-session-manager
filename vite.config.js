@@ -87,7 +87,9 @@ export async function apiMiddleware(req, res, next) {
       }
       res.end(md);
     } catch (e) {
-      const code = e.message === 'forbidden' ? 403 : e.code === 'unsupported' ? 400 : 500;
+      // not_found: an opaque ref (ADR-0017) that decoded cleanly but matches no
+      // session with a main transcript — client input, not a server fault.
+      const code = e.message === 'forbidden' ? 403 : e.code === 'unsupported' ? 400 : e.code === 'not_found' ? 404 : 500;
       json(code, { error: String(e && e.message ? e.message : e) });
     }
     return;
@@ -142,7 +144,7 @@ export async function apiMiddleware(req, res, next) {
     const ref = url.searchParams.get('ref');
     if (!source || !ref) return json(400, { error: 'missing source or ref' });
     try { json(200, await getConversation(source, ref, 30)); }
-    catch (e) { json(e.message === 'forbidden' ? 403 : 500, { error: String(e) }); }
+    catch (e) { json(e.message === 'forbidden' ? 403 : e.code === 'not_found' ? 404 : 500, { error: String(e) }); }
     return;
   }
 

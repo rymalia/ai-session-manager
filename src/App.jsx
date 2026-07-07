@@ -6,6 +6,7 @@ import Agents from './Agents.jsx';
 import { SORT_OPTIONS, sortConvos } from './sortConvos.js';
 import ExportMenu from './ExportMenu.jsx';
 import { normalizeExportOpts } from './exportOptions.js';
+import { STARRED_KEY, LEGACY_STARRED_KEY, decodeStarred, encodeStarred } from './starred.js';
 import './sort.css';
 
 // Fallback source metadata; replaced by /api/sources on load.
@@ -351,10 +352,15 @@ function loadFilters() {
   try { return JSON.parse(localStorage.getItem(FILTERS_KEY)) || {}; } catch { return {}; }
 }
 
-// Starred conversation keys persist separately.
-const STARRED_KEY = 'ccv.starred';
+// Starred conversation keys persist separately, in the versioned envelope
+// from starred.js (ADR-0017). A legacy bare-array `ccv.starred` migrates into
+// the envelope on first load (one write; the legacy key stays for rollback).
 function loadStarred() {
-  try { return JSON.parse(localStorage.getItem(STARRED_KEY)) || []; } catch { return []; }
+  let v1 = null, legacy = null;
+  try { v1 = localStorage.getItem(STARRED_KEY); legacy = localStorage.getItem(LEGACY_STARRED_KEY); } catch {}
+  const { keys, needsWrite } = decodeStarred(v1, legacy);
+  if (needsWrite) { try { localStorage.setItem(STARRED_KEY, encodeStarred(keys)); } catch {} }
+  return keys;
 }
 
 // Export options are shared across all cards (one menu open at a time) and
@@ -407,7 +413,7 @@ export default function App() {
   const toggleStar = useCallback((key) => setStarred((prev) => {
     const next = new Set(prev);
     next.has(key) ? next.delete(key) : next.add(key);
-    try { localStorage.setItem(STARRED_KEY, JSON.stringify([...next])); } catch {}
+    try { localStorage.setItem(STARRED_KEY, encodeStarred(next)); } catch {}
     return next;
   }), []);
 
