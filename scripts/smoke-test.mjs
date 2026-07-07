@@ -29,6 +29,34 @@ const acheck = async (name, fn) => { try { await fn(); pass++; } catch (e) { fai
 
 const t0 = Date.now();
 
+// Keep scripts + fixtures textual. A literal NUL (or invalid UTF-8) makes
+// tooling — including Claude Code's grep shim, whose -I skips "binary" files —
+// silently drop the file from searches (bit us via a raw 0x00 in a codec test
+// string, landed in 9fed1aa). Extension-ALLOWLISTED on purpose: a future
+// genuinely-binary fixture can exist without tripping this; only files meant
+// to be text are scanned. Failure names the offending file.
+check('scripts + text fixtures contain no NUL / invalid UTF-8', () => {
+  const SCAN = [
+    { dir: new URL('.', import.meta.url), exts: ['.mjs'] },
+    { dir: new URL('./fixtures/', import.meta.url), exts: ['.js', '.mjs', '.json', '.jsonl', '.md', '.txt'] },
+  ];
+  const utf8 = new TextDecoder('utf-8', { fatal: true });
+  const offenders = [];
+  for (const { dir, exts } of SCAN) {
+    const dirPath = fileURLToPath(dir);
+    let names = [];
+    try { names = fs.readdirSync(dirPath); } catch { continue; }
+    for (const name of names) {
+      if (!exts.some((e) => name.endsWith(e))) continue;
+      const buf = fs.readFileSync(path.join(dirPath, name));
+      if (buf.includes(0)) { offenders.push(`${name}: literal NUL`); continue; }
+      try { utf8.decode(buf); } catch { offenders.push(`${name}: invalid UTF-8`); }
+    }
+  }
+  if (offenders.length) throw new Error(offenders.join('; '));
+  return true;
+});
+
 // ---- list contract ----
 const all = await listConversations();
 check('list returns array', Array.isArray(all));
@@ -608,7 +636,7 @@ check('claude ref codec: roundtrip', (() => {
 check('claude ref codec: rejects malformed/traversal refs', (() => {
   const bad = [
     'v2:a:b', 'v1:a', 'v1:a:b:c', 'v1::b', 'v1:a:', 'v1:.:b', 'v1:..:b',
-    'v1:a:..', 'v1:a/b:c', 'v1:a\\b:c', 'v1:a b:c', 'v1:a:b ',
+    'v1:a:..', 'v1:a/b:c', 'v1:a\\b:c', 'v1:a b:c', 'v1:a:b\x00',
     'v1:é:b', '/etc/passwd', '', null, undefined, 42,
   ];
   return bad.every((r) => decodeClaudeRef(r) === null);
