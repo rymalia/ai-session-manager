@@ -304,9 +304,11 @@ const ConversationCard = memo(function ConversationCard({
         </div>
         <div className="card-actions">
           <StarButton on={starred} onToggle={() => onToggleStar(convo.key)} />
-          <CopyButton text={convo.resume} />
+          {/* Recovered sessions (main transcript deleted) have no resume
+              command and no exporter until the F3 converter — hide both. */}
+          {convo.resume && <CopyButton text={convo.resume} />}
           <OpenButton path={convo.projectPath} />
-          {meta[convo.source]?.exportable && (
+          {meta[convo.source]?.exportable && convo.exportable !== false && (
             <ExportMenu
               source={convo.source}
               srcRef={convo.ref}
@@ -322,9 +324,11 @@ const ConversationCard = memo(function ConversationCard({
 
       {expanded && (
         <div className="card-body">
-          <div className="resume-line">
-            <code>{convo.resume}</code>
-          </div>
+          {convo.resume && (
+            <div className="resume-line">
+              <code>{convo.resume}</code>
+            </div>
+          )}
           {loading && <div className="muted pad">Loading last 30 messages…</div>}
           {detail && detail.error && (
             <div className="error pad">

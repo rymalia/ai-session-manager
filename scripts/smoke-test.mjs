@@ -9,12 +9,12 @@ import { fileURLToPath } from 'node:url';
 import { listConversations, getConversation, collectEvents, exportCapableSources, exportCapabilities, SOURCE_META } from '../server/sources/index.js';
 import { getUsage } from '../server/usage.js';
 import { openPath } from '../server/open.js';
-import { searchContent } from '../server/search.js';
+import { searchContent, entrySignature } from '../server/search.js';
 import { renderMarkdown, truncate, deriveContentDisposition, deriveFlagTokens, deriveExportFilename, resolveExportOptions, summarizeToolUse, pyRepr } from '../server/export.js';
 import { parseClaudeUsage, finalizeContextUsage, createClaudeContextTracker } from '../server/contextUsage.js';
 import { apiMiddleware } from '../vite.config.js';
 import { normalizeExportOpts, buildExportQuery, clampMaxChars, DEFAULT_EXPORT_OPTS } from '../src/exportOptions.js';
-import { encodeClaudeRef, decodeClaudeRef, resolveBundle } from '../server/sources/claudeBundle.js';
+import { encodeClaudeRef, decodeClaudeRef, resolveBundle, loadProjectIndexMap } from '../server/sources/claudeBundle.js';
 import { decodeStarred, encodeStarred } from '../src/starred.js';
 
 let pass = 0;
@@ -64,7 +64,10 @@ for (const c of all) (bySource[c.source] ??= []).push(c);
 for (const [src, list] of Object.entries(bySource)) {
   check(`SOURCE_META defines ${src}`, !!SOURCE_META[src]);
   await acheck(`detail[${src}]`, async () => {
-    const d = await getConversation(src, list[0].ref, 10);
+    // Recovered Claude sessions (resume '') legitimately return no resume
+    // command and empty messages — probe a live-transcript entry.
+    const probe = list.find((c) => c.resume) || list[0];
+    const d = await getConversation(src, probe.ref, 10);
     if (!d || !Array.isArray(d.messages)) throw new Error('messages not an array');
     if (!d.resume) throw new Error('missing resume command');
     if (d.messages.some((m) => !['user', 'assistant', 'tool'].includes(m.role)))
@@ -273,10 +276,13 @@ await acheck('export endpoint: claude history=on → 400 names the option', asyn
 // Happy-path THROUGH the endpoint: `full` must reach the renderer with all four flags
 // on. The parity harness expands full manually, so only an endpoint test catches a
 // mis-wired handler. Data-dependent: runs only when a real session exists.
+// Recovered Claude sessions (exportable:false, F2) have no exporter until F3 —
+// endpoint happy-path tests must pick an entry with a main transcript.
+const firstExportable = (src) => bySource[src]?.find((c) => c.exportable !== false);
 for (const src of ['codex', 'claude']) {
-  if (!bySource[src]?.length) continue;
+  if (!firstExportable(src)) continue;
   await acheck(`export endpoint: full=1 reaches renderer with four flags (${src})`, async () => {
-    const ref = encodeURIComponent(bySource[src][0].ref);
+    const ref = encodeURIComponent(firstExportable(src).ref);
     const res = await callApi(`/api/export?source=${src}&ref=${ref}&full=1`);
     if (res.statusCode !== 200) throw new Error(`expected 200, got ${res.statusCode}: ${res.body.slice(0, 120)}`);
     if (!/- \*\*filters\*\*: tools=on, tool_results=on, thinking=on, sidechains=on\b/.test(res.body))
@@ -288,8 +294,8 @@ for (const src of ['codex', 'claude']) {
 // deviation from unbounded /replay), pinned by body equivalence against the
 // in-range value each out-of-range/malformed input must clamp/fall back to.
 // parseInt semantics: '12abc' truncates to 12; 'abc' is NaN → default 400.
-if (bySource.claude?.length) {
-  const ref = encodeURIComponent(bySource.claude[0].ref);
+if (firstExportable('claude')) {
+  const ref = encodeURIComponent(firstExportable('claude').ref);
   const getBody = async (params) => {
     const res = await callApi(`/api/export?source=claude&ref=${ref}${params}`);
     if (res.statusCode !== 200) throw new Error(`expected 200, got ${res.statusCode}: ${res.body.slice(0, 120)}`);
@@ -773,9 +779,9 @@ check('starred: legacy array migrates once into the v1 envelope', (() => {
 })());
 check('starred: valid envelope wins over legacy', () =>
   decodeStarred(encodeStarred(['new:key']), JSON.stringify(['old:key'])).keys.join(',') === 'new:key');
-check('starred: malformed/wrong-version envelope falls back to legacy', (() => {
+check('starred: malformed/unknown-version envelope falls back to legacy', (() => {
   const legacy = JSON.stringify(['a:b']);
-  return ['{not json', JSON.stringify({ version: 2, keys: ['x'] }), JSON.stringify({ keys: ['x'] }),
+  return ['{not json', JSON.stringify({ version: 3, keys: ['x'] }), JSON.stringify({ keys: ['x'] }),
     JSON.stringify({ version: 1, keys: 'x' }), JSON.stringify(['bare-array'])]
     .every((v1) => { const r = decodeStarred(v1, legacy); return r.keys.join(',') === 'a:b' && r.needsWrite; });
 })());
@@ -787,6 +793,193 @@ check('starred: everything malformed → empty, never throws', (() => {
 check('starred: non-string members are filtered', () =>
   decodeStarred(null, JSON.stringify(['ok', 42, null, 'also'])).keys.join(',') === 'ok,also'
   && decodeStarred(JSON.stringify({ version: 1, keys: ['ok', {}, 'also'] }), null).keys.join(',') === 'ok,also');
+
+// (6f) F2 listing/search integration (ADR-0017): one card per identity with
+// opaque refs + recovered (folder-only/index-only) metadata cards, the
+// starred v1→v2 Claude key rewrite, and cacheSignature invalidation.
+
+// Starred v2: the Claude path-key rewrite.
+const F2_PATH_KEY = 'claude:/Users/x/.claude/projects/-Users-x-proj/ab1250f2-1111-4222-8333-444455556666.jsonl';
+const F2_OPAQUE_KEY = 'claude:v1:-Users-x-proj:ab1250f2-1111-4222-8333-444455556666';
+check('starred v2: v1 envelope rewrites claude path keys, others untouched', (() => {
+  const v1 = JSON.stringify({ version: 1, keys: [F2_PATH_KEY, 'codex:/Users/x/.codex/sessions/r.jsonl', 'plain:key'] });
+  const r = decodeStarred(v1, null);
+  return r.needsWrite
+    && r.keys.join('|') === `${F2_OPAQUE_KEY}|codex:/Users/x/.codex/sessions/r.jsonl|plain:key`;
+})());
+check('starred v2: legacy bare array gets the same rewrite', () =>
+  decodeStarred(null, JSON.stringify([F2_PATH_KEY])).keys.join(',') === F2_OPAQUE_KEY);
+check('starred v2: non-conforming claude keys pass through unchanged', (() => {
+  const weird = [
+    'claude:v1:-slug:id',                       // already opaque (no .jsonl)
+    'claude:/x/no-jsonl-suffix',                // not a .jsonl path
+    'claude:relative.jsonl',                    // <2 path segments
+    'claude:/x/bad slug/aa.jsonl',              // slug fails charset
+    'claude:/x/../aa.jsonl',                    // traversal-shaped slug
+  ];
+  const r = decodeStarred(JSON.stringify({ version: 1, keys: weird }), null);
+  return r.keys.join('|') === weird.join('|');
+})());
+check('starred v2: rewrite is one-shot (v2 envelope is terminal)', (() => {
+  const migrated = decodeStarred(JSON.stringify({ version: 1, keys: [F2_PATH_KEY] }), null);
+  const again = decodeStarred(encodeStarred(migrated.keys), JSON.stringify([F2_PATH_KEY]));
+  return !again.needsWrite && again.keys.join(',') === F2_OPAQUE_KEY;
+})());
+
+// Search invalidation comparator (the F1-pinned contract, now live).
+check('search: entrySignature prefers cacheSignature, falls back to mtimeMs', () =>
+  entrySignature({ cacheSignature: 'a@1:2', mtimeMs: 7 }) === 'a@1:2'
+  && entrySignature({ cacheSignature: null, mtimeMs: 7 }) === 7
+  && entrySignature({ mtimeMs: 7 }) === 7);
+
+await acheck('claude index map: read errors do not poison same-stat cache', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'asm-index-cache-'));
+  const indexPath = path.join(dir, 'sessions-index.json');
+  const originalReadFile = fs.promises.readFile;
+  try {
+    fs.writeFileSync(indexPath, JSON.stringify({
+      entries: [{ sessionId: 'cache-test', summary: 'Recovered after read error' }],
+    }));
+    fs.promises.readFile = async (...args) => {
+      if (args[0] === indexPath) {
+        const e = new Error('permission denied');
+        e.code = 'EACCES';
+        throw e;
+      }
+      return originalReadFile(...args);
+    };
+    const unreadable = await loadProjectIndexMap(dir);
+    if (unreadable.size !== 0) throw new Error('read error should produce empty map');
+    fs.promises.readFile = originalReadFile;
+    const recovered = await loadProjectIndexMap(dir);
+    if (recovered.get('cache-test')?.summary !== 'Recovered after read error') {
+      throw new Error('same-stat recovery should re-read instead of returning stale empty map');
+    }
+  } finally {
+    fs.promises.readFile = originalReadFile;
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// List integration: era matrix through the REAL adapter list()+detail() in a
+// child process (HOME-at-import constraint). One project stages every era +
+// decoys; assertions pin one-card-per-identity, opaque refs, recovered-card
+// field derivations, and that main cards ignore index display fields.
+await acheck('claude list (F2): one card per identity, recovered cards, opaque refs', async () => {
+  const tempHome = fs.mkdtempSync(path.join(os.tmpdir(), 'asm-claude-f2-'));
+  try {
+    const SLUG = '-f2-proj';
+    const proj = path.join(tempHome, '.claude', 'projects', SLUG);
+    const MAIN1 = 'aa000001-1111-4222-8333-444455556666'; // main-only
+    const MAIN2 = 'aa000002-1111-4222-8333-444455556666'; // main + folder (ONE card)
+    const FOLD = 'bb000001-1111-4222-8333-444455556666';  // folder-only + index entry
+    const IDX = 'cc000001-1111-4222-8333-444455556666';   // index-only
+    const IDXBAD = 'cc000002-1111-4222-8333-444455556666'; // index-only, garbage `modified`
+    const SIDE = 'dd000001-1111-4222-8333-444455556666';  // isSidechain → NO card
+    const fixture = fileURLToPath(new URL('./fixtures/claude-index-enrichment.jsonl', import.meta.url));
+    fs.mkdirSync(path.join(proj, `${MAIN2}`, 'subagents'), { recursive: true });
+    fs.mkdirSync(path.join(proj, `${FOLD}`, 'subagents'), { recursive: true });
+    fs.mkdirSync(path.join(proj, 'memory'), { recursive: true }); // decoy dir
+    fs.copyFileSync(fixture, path.join(proj, `${MAIN1}.jsonl`));
+    fs.copyFileSync(fixture, path.join(proj, `${MAIN2}.jsonl`));
+    fs.writeFileSync(path.join(proj, `${MAIN2}`, 'subagents', 'agent-a.jsonl'), '{}\n');
+    fs.writeFileSync(path.join(proj, `${FOLD}`, 'subagents', 'agent-a.jsonl'), '{}\n');
+    fs.writeFileSync(path.join(proj, '_notes.txt'), 'decoy'); // decoy file
+    fs.writeFileSync(path.join(proj, 'sessions-index.json'), JSON.stringify({
+      version: 1,
+      entries: [
+        { sessionId: MAIN1, summary: 'INDEX-DECOY', messageCount: 999 },
+        { sessionId: FOLD, summary: 'Recovered folder session', firstPrompt: 'hello recovered', messageCount: 42, created: '2026-01-01T00:00:00.000Z', modified: '2026-01-03T00:00:00.000Z', gitBranch: 'rec-branch', projectPath: '/tmp/proj-x' },
+        { sessionId: IDX, summary: 'Index only session', messageCount: 7, created: '2026-01-02T00:00:00.000Z', modified: '2026-01-02T03:04:05.000Z' },
+        { sessionId: IDXBAD, summary: 'Bad modified', modified: 'garbage', fileMtime: 1234567890123 },
+        { sessionId: SIDE, summary: 'sidechain leg', isSidechain: true },
+      ],
+    }));
+
+    // Three list() runs in ONE process so the module-level index-map cache is
+    // actually exercised: initial state → index REWRITTEN (must evict via
+    // mtime/size signature) → index DELETED (must evict via 'missing' state).
+    const out = JSON.parse(execFileSync(
+      process.execPath,
+      ['--input-type=module', '-e', `
+        const [adapterUrl, idxPath, idxId] = process.argv.slice(1);
+        const fsc = await import('node:fs');
+        const claude = await import(adapterUrl);
+        const run = async () => {
+          const entries = await claude.list();
+          const details = {};
+          for (const e of entries) if (!e.resume) details[e.id] = await claude.detail(e.ref);
+          return { entries, details };
+        };
+        const first = await run();
+        const data = JSON.parse(fsc.readFileSync(idxPath, 'utf-8'));
+        for (const e of data.entries) if (e.sessionId === idxId) e.summary = 'Index only session UPDATED';
+        fsc.writeFileSync(idxPath, JSON.stringify(data));
+        const second = await run();
+        fsc.unlinkSync(idxPath);
+        const third = await run();
+        process.stdout.write(JSON.stringify({ ...first, second, third }));
+      `,
+        new URL('../server/sources/claude.js', import.meta.url).href,
+        path.join(proj, 'sessions-index.json'),
+        IDX,
+      ],
+      { env: { ...process.env, HOME: tempHome }, encoding: 'utf8' },
+    ));
+
+    const byId = Object.fromEntries(out.entries.map((e) => [e.id, e]));
+    const ids = out.entries.map((e) => e.id).sort();
+    const expect = [MAIN1, MAIN2, FOLD, IDX, IDXBAD].sort();
+    if (ids.join(',') !== expect.join(','))
+      throw new Error(`expected cards ${expect.join(',')}, got ${ids.join(',')}`);
+    if (new Set(out.entries.map((e) => e.key)).size !== out.entries.length) throw new Error('duplicate keys');
+    for (const e of out.entries) {
+      if (!decodeClaudeRef(e.ref)) throw new Error(`ref not opaque: ${e.ref}`);
+      if (typeof e.cacheSignature !== 'string' || !e.cacheSignature) throw new Error(`missing cacheSignature on ${e.id}`);
+    }
+
+    for (const id of [MAIN1, MAIN2]) {
+      const m = byId[id];
+      if (m.title === 'INDEX-DECOY' || m.messageCount === 999) throw new Error('main card took index display fields');
+      if (!(m.messageCount > 0)) throw new Error('main card lost transcript-derived counts');
+      if (!m.resume.includes(`claude --resume ${id}`)) throw new Error('main card lost resume');
+      if (m.exportable === false) throw new Error('main card must stay exportable');
+    }
+    const f = byId[FOLD];
+    if (f.title !== 'Recovered folder session' || f.gitBranch !== 'rec-branch' || f.messageCount !== 42
+      || f.projectPath !== '/tmp/proj-x' || f.resume !== '' || f.exportable !== false || f.contextUsage !== null)
+      throw new Error('folder-only card fields wrong');
+    if (!(f.mtimeMs > 0)) throw new Error('folder-only mtime should come from subagent');
+    const ix = byId[IDX];
+    if (ix.mtimeMs !== Date.parse('2026-01-02T03:04:05.000Z') || ix.lastActivity !== '2026-01-02T03:04:05.000Z'
+      || ix.firstActivity !== '2026-01-02T00:00:00.000Z' || ix.messageCount !== 7)
+      throw new Error('index-only card fields wrong');
+    const bad = byId[IDXBAD];
+    if (bad.mtimeMs !== 1234567890123 || bad.lastActivity !== new Date(1234567890123).toISOString()
+      || !Number.isFinite(bad.mtimeMs))
+      throw new Error('garbage modified should fall back to numeric fileMtime + visible activity');
+
+    if (out.details[FOLD]?.recovered !== 'folder-only' || out.details[FOLD].messages.length !== 0)
+      throw new Error('folder-only detail should be recovered + empty');
+    if (out.details[IDX]?.recovered !== 'index-only') throw new Error('index-only detail should be recovered');
+    if (out.details[FOLD].title !== 'Recovered folder session') throw new Error('recovered detail lost index title');
+
+    // Index-map cache eviction (same process): a rewrite must surface the new
+    // summary; deletion must drop index-only cards while folder-only survives
+    // on its subagent artifact (title falls back — no index left to name it).
+    const secondIdx = out.second.entries.find((e) => e.id === IDX);
+    if (secondIdx?.title !== 'Index only session UPDATED')
+      throw new Error('index rewrite did not evict the cached index map');
+    const thirdIds = out.third.entries.map((e) => e.id).sort();
+    if (thirdIds.includes(IDX) || thirdIds.includes(IDXBAD))
+      throw new Error('deleted index should drop index-only cards');
+    const thirdFold = out.third.entries.find((e) => e.id === FOLD);
+    if (!thirdFold || thirdFold.title !== '(untitled)' || thirdFold.exportable !== false)
+      throw new Error('folder-only card should survive index deletion via its subagents');
+  } finally {
+    fs.rmSync(tempHome, { recursive: true, force: true });
+  }
+});
 
 // (7) isMeta user turns are suppressed unless --verbatim.
 await acheck('render: isMeta user suppressed unless verbatim', async () => {

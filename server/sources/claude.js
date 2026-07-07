@@ -5,7 +5,7 @@ import path from 'node:path';
 import readline from 'node:readline';
 import { makeEntry, cdPrefix, clip, toolUseLine, toolResultLine, thinkingLine, isInside } from './_shared.js';
 import { createClaudeContextTracker } from '../contextUsage.js';
-import { ROOT, decodeClaudeRef, resolveBundle, loadSessionIndex } from './claudeBundle.js';
+import { ROOT, encodeClaudeRef, decodeClaudeRef, resolveBundle, resolveProjectBundles, loadSessionIndex } from './claudeBundle.js';
 
 export const source = 'claude';
 
@@ -102,55 +102,113 @@ async function readSession(file, { wantMessages = false, lastN = 30 } = {}) {
 
 const cache = new Map(); // file -> { mtimeMs, summary }
 
+// One card per logical identity (ADR-0017, F2): each project is resolved to
+// bundles in one batched pass, so a main transcript and its companion folder
+// are a single card, and folder-only / index-only sessions (main deleted by
+// the CLI's cleanup) get metadata-only cards instead of vanishing. Refs are
+// opaque `v1:<slug>:<id>` from here on; entries carry `cacheSignature` so
+// search/list invalidation sees subagent/index changes, while `mtimeMs`
+// remains the numeric sort key.
 export async function list() {
-  let dirs = [];
+  let slugs = [];
   try {
-    dirs = fs.readdirSync(ROOT, { withFileTypes: true }).filter((d) => d.isDirectory()).map((d) => d.name);
+    slugs = fs.readdirSync(ROOT, { withFileTypes: true }).filter((d) => d.isDirectory()).map((d) => d.name);
   } catch { return []; }
 
   const out = [];
-  for (const dir of dirs) {
-    const dirPath = path.join(ROOT, dir);
-    let files = [];
-    try { files = fs.readdirSync(dirPath).filter((f) => f.endsWith('.jsonl')); } catch { continue; }
-    for (const f of files) {
-      const file = path.join(dirPath, f);
-      let stat; try { stat = fs.statSync(file); } catch { continue; }
-      if (stat.size === 0) continue;
-      let summary;
-      const hit = cache.get(file);
-      if (hit && hit.mtimeMs === stat.mtimeMs) summary = hit.summary;
-      else {
-        try { ({ summary } = await readSession(file)); } catch { continue; }
-        cache.set(file, { mtimeMs: stat.mtimeMs, summary });
+  for (const slug of slugs) {
+    let bundles;
+    try { bundles = await resolveProjectBundles(slug); } catch { continue; }
+    for (const b of bundles.values()) {
+      const { sessionId } = b.identity;
+      const ref = encodeClaudeRef(b.identity);
+      if (b.mainPath) {
+        // Live main transcript — display fields derive from readSession
+        // exactly as before F2 (context health included; the index is NOT
+        // consulted for these cards). Only ref scheme + cacheSignature changed.
+        const stat = b.stats.main;
+        if (stat.size === 0) continue;
+        let summary;
+        const hit = cache.get(b.mainPath);
+        if (hit && hit.mtimeMs === stat.mtimeMs) summary = hit.summary;
+        else {
+          try { ({ summary } = await readSession(b.mainPath)); } catch { continue; }
+          cache.set(b.mainPath, { mtimeMs: stat.mtimeMs, summary });
+        }
+        if (summary.userCount === 0 && summary.assistantCount === 0) continue;
+        const cwd = summary.cwd || decodeProjectDir(slug);
+        out.push(makeEntry({
+          source, id: sessionId, ref,
+          title: summary.title, cwd, gitBranch: summary.gitBranch,
+          userCount: summary.userCount, assistantCount: summary.assistantCount,
+          firstActivity: summary.firstTs,
+          lastActivity: summary.lastTs || stat.mtime.toISOString(),
+          mtimeMs: stat.mtimeMs, firstUserText: summary.firstUserText,
+          resume: `${cdPrefix(cwd)}claude --resume ${sessionId}`,
+          contextUsage: summary.contextUsage,
+          cacheSignature: b.compositeSignature,
+        }));
+      } else {
+        // Recovered session (folder-only / index-only): metadata-only card,
+        // no transcript parsing (ADR-0012 — the converter is F3). Context
+        // health needs the main transcript (ADR-0017) → null. resume '' —
+        // the CLI cleaned this session up, a resume command would be a lie.
+        // exportable:false — export 404s until the F3 converter exists.
+        const idx = b.indexMeta;
+        const isFolderOnly = b.subagentPaths.length > 0;
+        let mtimeMs = 0;
+        let lastActivity = null;
+        if (isFolderOnly) {
+          mtimeMs = b.stats.newestSubagentMs || 0;
+          lastActivity = mtimeMs ? new Date(mtimeMs).toISOString() : null;
+        } else {
+          // Index timestamps are external input: only Number.isFinite-parsed
+          // values may reach lastActivity/firstActivity — an invalid string
+          // would sort as 0 (burying the card) and blank the time badge.
+          const mod = idx && typeof idx.modified === 'string' ? Date.parse(idx.modified) : NaN;
+          if (Number.isFinite(mod)) {
+            mtimeMs = mod;
+            lastActivity = idx.modified;
+          } else {
+            if (idx && Number.isFinite(idx.fileMtime)) {
+              mtimeMs = idx.fileMtime;
+              lastActivity = new Date(idx.fileMtime).toISOString();
+            } else {
+              const cre = idx && typeof idx.created === 'string' ? Date.parse(idx.created) : NaN;
+              if (Number.isFinite(cre)) lastActivity = idx.created;
+            }
+          }
+        }
+        const created = idx && typeof idx.created === 'string' && Number.isFinite(Date.parse(idx.created))
+          ? idx.created : null;
+        out.push(makeEntry({
+          source, id: sessionId, ref,
+          title: (idx && idx.summary) || null,
+          cwd: (idx && idx.projectPath) || decodeProjectDir(slug),
+          gitBranch: (idx && idx.gitBranch) || null,
+          messageCount: idx && Number.isFinite(idx.messageCount) ? idx.messageCount : undefined,
+          firstActivity: created,
+          lastActivity, mtimeMs,
+          firstUserText: (idx && idx.firstPrompt) || '',
+          resume: '',
+          contextUsage: null,
+          cacheSignature: b.compositeSignature,
+          exportable: false,
+        }));
       }
-      if (summary.userCount === 0 && summary.assistantCount === 0) continue;
-      const id = f.replace(/\.jsonl$/, '');
-      const cwd = summary.cwd || decodeProjectDir(dir);
-      out.push(makeEntry({
-        source, id, ref: file,
-        title: summary.title, cwd, gitBranch: summary.gitBranch,
-        userCount: summary.userCount, assistantCount: summary.assistantCount,
-        firstActivity: summary.firstTs,
-        lastActivity: summary.lastTs || stat.mtime.toISOString(),
-        mtimeMs: stat.mtimeMs, firstUserText: summary.firstUserText,
-        resume: `${cdPrefix(cwd)}claude --resume ${id}`,
-        contextUsage: summary.contextUsage,
-      }));
     }
   }
   return out;
 }
 
-// Dual-scheme ref acceptance (ADR-0017, F1). Opaque `v1:<slug>:<id>` refs are
+// Dual-scheme ref acceptance (ADR-0017). Opaque `v1:<slug>:<id>` refs are
 // discriminated by their scheme prefix (decodeClaudeRef → null for anything
 // else — no sniffing) and resolved through the bundle resolver; every other
 // ref is the legacy absolute-path form, handled byte-for-byte as before.
-// In F1 an opaque ref requires a surviving MAIN transcript: folder-only /
-// index-only sessions have no detail/export path until the 1B converter (F3),
-// so they map to 'not_found' (→ 404), distinct from containment's 'forbidden'
-// (→ 403). list() still emits path refs; the flip to opaque emission happens
-// with one-card-per-identity in F2.
+// EXPORT (collectEvents) requires a surviving MAIN transcript until the 1B
+// converter lands (F3): a recovered identity maps to 'not_found' (→ 404),
+// distinct from containment's 'forbidden' (→ 403). detail() resolves bundles
+// itself since F2 so recovered cards can expand.
 async function resolveRefToMainPath(ref) {
   const identity = decodeClaudeRef(ref);
   if (identity) {
@@ -167,8 +225,30 @@ async function resolveRefToMainPath(ref) {
   return resolved;
 }
 
-export async function detail(ref, lastN = 30) {
-  const resolved = await resolveRefToMainPath(ref);
+// ADR-0017's explicit preview behavior for recovered sessions (F2): a
+// metadata-only response — index-derived header fields, empty messages, no
+// transcript parsing (ADR-0012). The `recovered` field tells the client (and
+// future F3 UI) why the transcript is empty.
+function recoveredDetail(bundle) {
+  const idx = bundle.indexMeta;
+  const cwd = (idx && idx.projectPath) || decodeProjectDir(bundle.identity.projectSlug);
+  // Title mirrors the list card: summary, else a firstPrompt slice (same 80
+  // cap makeEntry applies), else null.
+  const title = (idx && (idx.summary
+    || (typeof idx.firstPrompt === 'string' && idx.firstPrompt ? idx.firstPrompt.slice(0, 80) : null))) || null;
+  return {
+    source,
+    id: bundle.identity.sessionId,
+    title,
+    projectPath: cwd,
+    gitBranch: (idx && idx.gitBranch) || null,
+    resume: '',
+    recovered: bundle.subagentPaths.length ? 'folder-only' : 'index-only',
+    messages: [],
+  };
+}
+
+async function mainDetail(resolved, lastN) {
   const { summary, messages } = await readSession(resolved, { wantMessages: true, lastN });
   const id = path.basename(resolved).replace(/\.jsonl$/, '');
   const cwd = summary.cwd || '';
@@ -177,6 +257,23 @@ export async function detail(ref, lastN = 30) {
     resume: `${cdPrefix(cwd)}claude --resume ${id}`,
     messages: messages || [],
   };
+}
+
+export async function detail(ref, lastN = 30) {
+  const identity = decodeClaudeRef(ref);
+  if (identity) {
+    const bundle = await resolveBundle(identity);
+    if (!bundle) {
+      const e = new Error('not found');
+      e.code = 'not_found';
+      throw e;
+    }
+    if (!bundle.mainPath) return recoveredDetail(bundle);
+    return mainDetail(bundle.mainPath, lastN);
+  }
+  const resolved = path.resolve(ref);
+  if (!isInside(resolved, ROOT)) throw new Error('forbidden');
+  return mainDetail(resolved, lastN);
 }
 
 // ---------------------------------------------------------------------------

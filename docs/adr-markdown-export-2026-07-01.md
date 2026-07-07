@@ -404,6 +404,23 @@ Each ADR is **Decision / Why / Consequence** and carries an explicit status.
   The two-scheme straddle is accepted as the price of not generalizing
   prematurely.
 
+  **Resolution (2026-07-07, loop F2) — recovered-session behavior**, closing
+  the "define explicit preview/search behavior" consequence above. For
+  folder-only and index-only sessions (no main transcript): **preview** is a
+  metadata-only detail response — index-derived header fields,
+  `recovered: 'folder-only' | 'index-only'`, `messages: []`, no transcript
+  parsing (the converter is F3, ADR-0012); **search** matches client-side
+  metadata only (the content index caches an empty body); **resume** is `''`
+  and the UI hides the resume affordances (the CLI deleted the session — a
+  resume command would be a lie); **export** is gated per-entry
+  (`exportable: false`) until the F3 converter, while `collectEvents` maps a
+  recovered opaque ref to `not_found` → 404; **context health** is `null`
+  (main-transcript-only, as decided above). Card recency: folder-only from the
+  newest subagent mtime; index-only from the index entry's
+  `modified`/`fileMtime`, `Number.isFinite`-guarded. Entries carry
+  `cacheSignature` (composite artifact signature) and search invalidates on
+  `cacheSignature ?? mtimeMs`; `mtimeMs` remains the numeric sort key.
+
 ## ADR-0018 — Export timestamps render in local time; parity runs under TZ=UTC
 
 **Status:** Accepted (2026-07-06)

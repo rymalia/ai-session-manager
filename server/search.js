@@ -6,8 +6,16 @@
 // in-memory scan (fast). Multi-word queries are AND-matched (all terms present).
 import { listConversations, getConversation } from './sources/index.js';
 
-const index = new Map(); // key -> { mtimeMs, lower }
+const index = new Map(); // key -> { sig, lower }
 let building = null;
+
+// Invalidation signature for one conversation entry (the F2 contract pinned in
+// server/sources/claudeBundle.js): multi-artifact Claude bundles carry a
+// composite `cacheSignature` that moves when ANY artifact changes; every other
+// source falls back to the scalar file mtime.
+export function entrySignature(c) {
+  return c.cacheSignature ?? c.mtimeMs;
+}
 
 async function buildBatch(convos) {
   const CONCURRENCY = 40;
@@ -16,7 +24,7 @@ async function buildBatch(convos) {
   for (const c of convos) {
     seen.add(c.key);
     const hit = index.get(c.key);
-    if (!hit || hit.mtimeMs !== c.mtimeMs) todo.push(c);
+    if (!hit || hit.sig !== entrySignature(c)) todo.push(c);
   }
   for (const k of [...index.keys()]) if (!seen.has(k)) index.delete(k); // drop deleted
 
@@ -28,7 +36,7 @@ async function buildBatch(convos) {
         const d = await getConversation(c.source, c.ref, 30);
         lower = (d.messages || []).map((m) => m.text || '').join('\n').slice(0, 4000).toLowerCase();
       } catch { /* unreadable → empty, still cached so we don't retry every search */ }
-      index.set(c.key, { mtimeMs: c.mtimeMs, lower });
+      index.set(c.key, { sig: entrySignature(c), lower });
     }));
   }
 }

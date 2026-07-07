@@ -117,7 +117,7 @@ export function projectLabel(cwd) {
 export function makeEntry({
   source, id, ref, title, cwd, gitBranch,
   userCount = 0, assistantCount = 0, messageCount, firstActivity, lastActivity, mtimeMs, firstUserText = '', resume,
-  contextUsage = null,
+  contextUsage = null, cacheSignature = null, exportable,
 }) {
   return {
     source,
@@ -143,6 +143,15 @@ export function makeEntry({
     // Per-session context health (Claude/Codex only). null ⇒ no badge; the key
     // is always present so the frontend can rely on it. See server/contextUsage.js.
     contextUsage: contextUsage || null,
+    // Bundle invalidation signature (Claude only, ADR-0017): search compares
+    // `cacheSignature ?? mtimeMs` so multi-artifact sessions re-index when ANY
+    // artifact changes. null for single-file sources; mtimeMs stays the
+    // numeric sort key either way.
+    cacheSignature: cacheSignature || null,
+    // Entry-level export override: only ever `false` (recovered Claude
+    // sessions have no exporter until the F3 converter lands). Absent means
+    // "defer to the source-level capability".
+    ...(exportable === false ? { exportable: false } : {}),
   };
 }
 
