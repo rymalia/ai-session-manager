@@ -686,7 +686,45 @@ UI shippable (items A→B below) is the highest-value path; everything else is r
   parity byte-identical; build green. Plan-reviewed (REVISE → 6 findings
   folded) + impl-reviewed (FIX → 1 Major `lastActivity` leak + 3 Minors
   fixed across two rounds) via `/codex-plan-review`. **Remaining: F3 only.**
-- **F. 1B (§7 + ADR-0017) — the big one; gate now accepted (ADR-0012).** Canonical Claude
+- ✅ **F — loop F3 DONE & committed (`c3cc804`, 2026-07-07): the 1B converter.
+  EXPORT ITEM F — AND PHASE 1B — COMPLETE.** `collectEvents` collects the full
+  logical bundle for opaque refs (main → lexically-sorted subagent sidechains →
+  `history.jsonl` backfill, then ONE stable ts sort — concat order is the
+  equal-timestamp tiebreaker). All six §7 rules ported and golden-pinned:
+  subagent events tagged `subagent:<stem>` with the sidechain flag
+  **record-sourced** (`isSidechain` per record, mirroring render_event — §7
+  item 1's "sidechain:true" was shorthand; fixture-pinned); history tri-state
+  (`auto` → folder-only, so index-only resolves auto→OFF; explicit on/off
+  everywhere; folder-only honors `--no-history`); dedup key exact order
+  (`clean_user_text` FIRST → `\s+`→space → trim → lower → 200 **code points**,
+  string-valued MAIN user content only, no dedup without a main transcript);
+  index fallback via bundle `indexMeta`; `{meta, events, resolvedOpts}`
+  returned with requested opts never mutated (ADR-0014; filename tokens
+  untouched). Path refs mirror the reference's direct-file branch: top-level
+  `.jsonl` stays main-only, a subagent file (`subagents/` parent or `agent-*`
+  name) becomes a sniffed-id subagent-only bundle, and stale/non-file path
+  refs map to `not_found` → 404 on BOTH endpoints via shared
+  `containedFilePath` (detail() included — Codex impl-review Major).
+  `history.jsonl` is read fresh per export, never cached or stat'd into any
+  signature (ADR-0017 cache invariant, test-pinned). Capabilities flipped
+  `sidechains`/`history` → `supported`; recovered cards dropped
+  `exportable: false` (export menu returns via the existing App.jsx guard —
+  zero frontend edits). Parity harness gained `v1:<slug>:<id>` bundle mode
+  (Python side gets the bare UUID) + 3 history combos (15 total); bare UUIDs
+  rejected with a usage error. Tests 134→**143/0** (staged adversarial golden:
+  dedup matrix / collect-order tie / ms_to_iso `.mmmZ` / record-sourced flag,
+  all ALSO golden-diffed vs Python; hermetic converter probes; endpoint 200s
+  for recovered refs, 404s for stale paths, capability-gate pass-through).
+  Golden parity byte-identical on 6 sessions: pinned main-only, real
+  main+8-subagents (`minutes/17279b0b…`), real folder-only 261-turn recovery
+  (`open-asr-leaderboard/4c55e4e4…`, 14 subagents + 63 history lines), real
+  index-only (`claude-code-viewer/3dcc3e53…`), real history-heavy main
+  (`watchlist/b98b6bd7…`, 68 lines, dedup at scale), staged fixture — all
+  under TZ=UTC. Plan-reviewed (REVISE → 2 Major + 2 Minor + 1 Info folded:
+  subagent path-ref branch, snapshot-HOME history parity, stat→404,
+  record-sourced-flag fixture) + impl-reviewed (FIX → 1 Major detail()-500 +
+  1 Minor harness-UUID, both fixed) via `/codex-plan-review`.
+- **F. 1B (§7 + ADR-0017) — original spec (all shipped across F1/F2/F3 above).** Canonical Claude
   `SessionBundle` identity `{source, projectSlug, sessionId}` + **opaque versioned refs
   (Claude only** — others keep path refs, a deliberate two-scheme asymmetry). Shared resolver
   for `list`/`detail`/`collectEvents`/search → `{identity, mainPath, folderPath,

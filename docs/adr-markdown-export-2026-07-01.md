@@ -278,6 +278,13 @@ Each ADR is **Decision / Why / Consequence** and carries an explicit status.
   "coming in 1B" affordance). Explicit request behavior and `full` are defined by
   ADR-0014.
 
+  **Note (2026-07-07, loop F3):** the Claude example above illustrates the 1A
+  state that motivated the tri-value. Since F3 (`c3cc804`) the live Claude
+  adapter declares `sidechains: 'supported'` and `history: 'supported'` — the
+  `unavailable` state did exactly its job: it gated explicit requests with a
+  400 until the converter existed, then flipped without any endpoint or UI
+  change.
+
 ## ADR-0014 — Requested, effective, and resolved export options
 
 **Status:** Accepted
@@ -420,6 +427,15 @@ Each ADR is **Decision / Why / Consequence** and carries an explicit status.
   `modified`/`fileMtime`, `Number.isFinite`-guarded. Entries carry
   `cacheSignature` (composite artifact signature) and search invalidates on
   `cacheSignature ?? mtimeMs`; `mtimeMs` remains the numeric sort key.
+
+  **Resolution (2026-07-07, loop F3, `c3cc804`) — the converter landed**,
+  closing the two per-entry gates above: `collectEvents` now collects the full
+  bundle (main + lexically-sorted subagents + history backfill) for opaque
+  refs, so recovered sessions export real documents and `exportable: false`
+  is gone; the `history.jsonl`-never-invalidates-listing-caches consequence is
+  implemented structurally (read fresh at export time, never stat'd into any
+  signature) and test-pinned. Preview (`detail()`) and search behavior for
+  recovered sessions deliberately stay as resolved in F2 — metadata-only.
 
 ## ADR-0018 — Export timestamps render in local time; parity runs under TZ=UTC
 
