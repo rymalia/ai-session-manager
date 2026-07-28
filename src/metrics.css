@@ -99,6 +99,10 @@
   overflow: hidden;
 }
 .mx-bar-fill {
+  /* The track is a grid item (blockified by the grid), but the fill is a plain
+     inline <span> — width/height do not apply to inline elements, so without
+     this the bar computes to zero size and the chart renders empty. */
+  display: block;
   height: 100%;
   border-radius: 4px;
   min-width: 2px;
@@ -142,6 +146,7 @@
   overflow: hidden;
 }
 .mx-proj-fill {
+  display: block; /* inline spans ignore width/height — see .mx-bar-fill */
   height: 100%;
   background: var(--accent);
   opacity: 0.85;

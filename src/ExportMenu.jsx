@@ -10,15 +10,27 @@ import './export.css';
 // imperatively via a ref. Options themselves are owned by App (lifted state) so
 // every mounted menu stays in sync; this component is presentational + delivery.
 
+// `hint` is the hover definition. Keep each one describing what server/export.js
+// actually emits for that flag — not what the label suggests.
 const FLAG_ROWS = [
-  { key: 'tools', label: 'Tools' },
-  { key: 'toolResults', label: 'Tool results' },
-  { key: 'thinking', label: 'Thinking' },
-  { key: 'sidechains', label: 'Sidechains' },
-  { key: 'verbatim', label: 'Verbatim' },
-  { key: 'raw', label: 'Raw (body only)' },
-  { key: 'embedImages', label: 'Embed images' },
+  { key: 'tools', label: 'Tools', hint: 'Tool calls the assistant made — one line per call with the tool name and a summary of its arguments.' },
+  { key: 'toolResults', label: 'Tool results', hint: 'What each tool returned, in a fenced code block. Truncated at Max chars.' },
+  { key: 'thinking', label: 'Thinking', hint: "The assistant's internal reasoning blocks, quoted as _thinking:_ / _reasoning:_. Truncated at Max chars." },
+  { key: 'sidechains', label: 'Sidechains', hint: 'Subagent transcripts — work delegated to sub-agents — merged in and tagged [sidechain].' },
+  { key: 'verbatim', label: 'Verbatim', hint: 'Leave user messages exactly as recorded: keep system reminders and command wrappers instead of stripping them, and keep the original blank lines.' },
+  { key: 'raw', label: 'Raw (body only)', hint: 'Transcript body only — drops the session header (metadata, stats, flags used) and uses plain [ROLE timestamp] markers. Overrides Embed images.' },
+  { key: 'embedImages', label: 'Embed images', hint: 'Inline pasted images as real Markdown images (data: URI or original URL) instead of an [Image #N] placeholder. Ignored when Raw is on.' },
 ];
+
+const FULL_HINT = 'Shorthand for Tools + Tool results + Thinking + Sidechains, and the flag the filename records.';
+const HISTORY_HINT = "Backfill user prompts from the CLI's history log for prompts the transcript itself is missing. Auto = on only for recovered sessions (transcript deleted, subagent files left behind); otherwise off.";
+const MAXCHARS_HINT = 'Truncation limit for tool results and thinking/reasoning blocks (1–20000). User and assistant text is never truncated.';
+
+// One tooltip string from the option's definition plus whatever state note
+// applies (implied-by-Full, or an unsupported capability).
+function optTitle(hint, note) {
+  return [hint, note].filter(Boolean).join(' · ');
+}
 
 const TWO_MIB = 2 * 1024 * 1024;
 const prettyBytes = (n) => `${(n / 1048576).toFixed(1)} MiB`;
@@ -27,12 +39,12 @@ const prettyBytes = (n) => `${(n / 1048576).toFixed(1)} MiB`;
 // real /replay feature not built for this source yet (Claude 1A → 1B).
 function capNote(state) {
   if (state === 'notApplicable') return 'n/a';
-  if (state === 'unavailable') return 'in 1B';
+  if (state === 'unavailable') return 'not yet';
   return '';
 }
 function capTitle(state) {
   if (state === 'notApplicable') return 'Not applicable to this source';
-  if (state === 'unavailable') return 'A /replay feature coming in Phase 1B';
+  if (state === 'unavailable') return 'Not implemented for this source yet';
   return '';
 }
 
@@ -241,20 +253,20 @@ export default function ExportMenu({ source, srcRef, sourceLabel, capabilities, 
           <button type="button" className="exp-close" onClick={closePanel} aria-label="Close export options">×</button>
         </div>
 
-        <label className="exp-full">
+        <label className="exp-full" title={FULL_HINT}>
           <input type="checkbox" checked={opts.full} onChange={(e) => setOpt({ full: e.target.checked })} />
           <span className="exp-full-label">Full</span>
           <span className="exp-hint">tools · results · thinking · sidechains</span>
         </label>
 
         <div className="exp-flags">
-          {FLAG_ROWS.map(({ key, label }) => {
+          {FLAG_ROWS.map(({ key, label, hint }) => {
             const implied = opts.full && FULL_IMPLIES.includes(key);
             const supported = isSup(key);
             const disabled = implied || !supported;
             const checked = implied ? true : (supported && opts[key]);
             const note = implied ? 'via Full' : (!supported ? capNote(capState(key)) : '');
-            const title = implied ? 'Included by Full' : capTitle(capState(key));
+            const title = optTitle(hint, implied ? 'Included by Full' : capTitle(capState(key)));
             return (
               <div key={key} className={`exp-row ${disabled ? 'exp-disabled' : ''}`}>
                 <label title={title}>
@@ -272,7 +284,7 @@ export default function ExportMenu({ source, srcRef, sourceLabel, capabilities, 
           })}
         </div>
 
-        <div className="exp-field">
+        <div className="exp-field" title={optTitle(HISTORY_HINT, historySupported ? '' : capTitle(capState('history')))}>
           <label htmlFor={`${panelId}-hist`}>History</label>
           <select
             id={`${panelId}-hist`}
@@ -287,7 +299,7 @@ export default function ExportMenu({ source, srcRef, sourceLabel, capabilities, 
           {!historySupported && <span className="exp-note" title={capTitle(capState('history'))}>{capNote(capState('history'))}</span>}
         </div>
 
-        <div className="exp-field">
+        <div className="exp-field" title={MAXCHARS_HINT}>
           <label htmlFor={`${panelId}-max`}>Max chars</label>
           <input
             id={`${panelId}-max`}
