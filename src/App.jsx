@@ -715,11 +715,13 @@ export default function App() {
       {showStats && convos && (
         <section className="dashboard">
           <Metrics convos={convos} meta={meta} />
-          <Usage />
+          {/* Same order as the source chips above. */}
+          <Usage order={sourceCounts.map(([s]) => s)} />
         </section>
       )}
 
-      {showAgents && <Agents />}
+      {/* Same order as the source chips above. */}
+      {showAgents && <Agents order={sourceCounts.map(([s]) => s)} />}
 
       <main className="list">
         {error && (

@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { orderBySource } from './sourceOrder.js';
 import './usage.css';
 
 // Fallback source metadata; replaced by /api/sources on load. Mirrors the
@@ -83,7 +84,7 @@ function Card({ entry, meta }) {
   );
 }
 
-export default function Usage() {
+export default function Usage({ order }) {
   const [data, setData] = useState(null);
   const [meta, setMeta] = useState(DEFAULT_META);
   const [error, setError] = useState(null);
@@ -137,7 +138,7 @@ export default function Usage() {
 
       {!loading && !error && data && data.length > 0 && (
         <div className="usg-grid">
-          {data.map((entry) => (
+          {orderBySource(data, order).map((entry) => (
             <Card key={entry.source} entry={entry} meta={meta} />
           ))}
         </div>

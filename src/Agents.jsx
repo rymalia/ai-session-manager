@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { orderBySource } from './sourceOrder.js';
 import './agents.css';
 
 // Small copy-to-clipboard button, mirrors the app's existing copy affordance.
@@ -167,7 +168,9 @@ function AgentCard({ a }) {
   );
 }
 
-export default function Agents() {
+// Registry agent ids are the same ids as the conversation sources, so the
+// cards can follow the header chips exactly like the usage cards do.
+export default function Agents({ order }) {
   const [agents, setAgents] = useState(null);
   const [error, setError] = useState(null);
 
@@ -209,7 +212,7 @@ export default function Agents() {
 
       {agents && (
         <div className="ag-grid">
-          {agents.map((a) => (
+          {orderBySource(agents, order, (a) => a.id).map((a) => (
             <AgentCard key={a.id} a={a} />
           ))}
         </div>
