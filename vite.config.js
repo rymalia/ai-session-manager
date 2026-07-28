@@ -122,7 +122,7 @@ export async function apiMiddleware(req, res, next) {
   }
 
   if (url.pathname === '/api/agents/open') {
-    try { json(200, openAgentTerminal(url.searchParams.get('id'))); }
+    try { json(200, await openAgentTerminal(url.searchParams.get('id'))); }
     catch (e) { json(400, { error: String(e) }); }
     return;
   }

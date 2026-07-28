@@ -26,9 +26,11 @@ function CopyBtn({ text }) {
   );
 }
 
-// Launches a new macOS Terminal window running the agent.
-function OpenTerminalBtn({ id }) {
+// Launches the agent: a new macOS Terminal window for a CLI, or the desktop
+// app itself for one installed as an app bundle.
+function OpenTerminalBtn({ id, kind }) {
   const [state, setState] = useState(''); // '' | 'ok' | 'err'
+  const app = kind === 'app';
   const onClick = async () => {
     try {
       const r = await fetch('/api/agents/open?id=' + encodeURIComponent(id));
@@ -42,9 +44,15 @@ function OpenTerminalBtn({ id }) {
     <button
       className={`ag-btn ag-term ${state === 'ok' ? 'ag-ok' : state === 'err' ? 'ag-err' : ''}`}
       onClick={onClick}
-      title="Open a new Terminal window running this agent"
+      title={app ? 'Launch this desktop app' : 'Open a new Terminal window running this agent'}
     >
-      {state === 'ok' ? '✓ Opened' : state === 'err' ? '✗ Failed' : '⎋ Open in Terminal'}
+      {state === 'ok'
+        ? '✓ Opened'
+        : state === 'err'
+          ? '✗ Failed'
+          : app
+            ? '⇱ Open app'
+            : '⎋ Open in Terminal'}
     </button>
   );
 }
@@ -131,7 +139,7 @@ function AgentCard({ a }) {
         )}
         {a.installed && a.path && (
           <div className="ag-row">
-            <span className="ag-key">Binary</span>
+            <span className="ag-key">{a.kind === 'app' ? 'App' : 'Binary'}</span>
             <code className="ag-val ag-mono">{a.path}</code>
           </div>
         )}
@@ -159,7 +167,7 @@ function AgentCard({ a }) {
         <code className="ag-cmd">{a.runCommand}</code>
         <div className="ag-cmd-actions">
           <CopyBtn text={a.runCommand} />
-          {a.installed && <OpenTerminalBtn id={a.id} />}
+          {a.installed && <OpenTerminalBtn id={a.id} kind={a.kind} />}
         </div>
       </div>
 

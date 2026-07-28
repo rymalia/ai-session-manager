@@ -32,6 +32,11 @@ function expand(p) {
 // a single dominant install method; otherwise it's null and no Update button is
 // shown. If you installed a tool differently (e.g. Homebrew instead of npm),
 // adjust the command here.
+//
+// `configFile` may be a list when a tool accepts more than one well-known
+// filename; candidates are listed in preference order and the card reports
+// whichever actually exists (see getAgents), so a legitimate config is never
+// shown as missing just because it used the second-listed spelling.
 const REGISTRY = [
   {
     id: 'claude',
@@ -67,10 +72,14 @@ const REGISTRY = [
     id: 'opencode',
     label: 'opencode',
     bin: 'opencode',
+    // Also ships as a macOS desktop app, which is a real install even though
+    // it puts nothing on PATH.
+    app: 'OpenCode',
     configDir: '~/.config/opencode',
-    configFile: '~/.config/opencode/opencode.json',
+    // opencode accepts both JSON and JSONC.
+    configFile: ['~/.config/opencode/opencode.json', '~/.config/opencode/opencode.jsonc'],
     run: 'opencode',
-    // Built-in self-updater.
+    // Built-in self-updater (CLI only — the desktop build updates itself).
     update: 'opencode upgrade',
   },
   {
@@ -138,35 +147,74 @@ const REGISTRY = [
 
 const BY_ID = new Map(REGISTRY.map((r) => [r.id, r]));
 
-// The shell used to resolve binaries and run update commands. A POSIX login
-// shell picks up the same PATH the user gets in a terminal (Homebrew,
-// ~/.local/bin, uv, bun, etc.), which the dev server's environment might miss.
+// The shell used to resolve binaries and run update commands. It must be the
+// user's ACTUAL login shell, not a hardcoded bash: macOS has defaulted to zsh
+// since Catalina, and zsh reads ~/.zshrc only in an INTERACTIVE shell. A plain
+// `bash -lc` therefore sees none of the PATH entries a user adds there — which
+// is where most per-tool installs land (e.g. ~/.kimi-code/bin) — and reports
+// an installed agent as missing. Hence -i for zsh.
 function userShell(command) {
   if (process.platform === 'win32') return ['cmd.exe', ['/d', '/s', '/c', command]];
-  const sh = fs.existsSync('/bin/bash') ? '/bin/bash' : '/bin/sh';
-  return [sh, ['-lc', command]];
+  const env = process.env.SHELL;
+  const sh = env && fs.existsSync(env) ? env : fs.existsSync('/bin/bash') ? '/bin/bash' : '/bin/sh';
+  return [sh, [/(^|\/)zsh$/.test(sh) ? '-lic' : '-lc', command]];
 }
 
-// Resolve a binary on PATH. Returns absolute path or null.
-async function resolveBin(bin) {
+// Marker so the PATH survives anything an interactive rc file prints first.
+const PATH_MARKER = '__asm_path__';
+
+// The PATH the user actually gets in a terminal. The server's own PATH is not
+// enough: it was inherited when the process started, so a tool installed (or a
+// PATH entry added) since launch is invisible until a restart. One shell spawn
+// per request, not one per agent. The command is a constant — nothing is
+// interpolated into it — so there is no injection surface here at all.
+async function userPathDirs() {
+  const own = (process.env.PATH || '').split(path.delimiter);
+  let shellDirs = [];
   try {
-    const [cmd, args] = userShell(
-      process.platform === 'win32' ? `where ${bin}` : `command -v ${bin}`
-    );
-    const { stdout } = await execFileP(cmd, args, { timeout: 4000 });
-    const p = stdout.split('\n').map((s) => s.trim()).find(Boolean);
-    return p || null;
+    const [cmd, args] = userShell(`printf '${PATH_MARKER}%s' "$PATH"`);
+    const { stdout } = await execFileP(cmd, args, { timeout: 5000, maxBuffer: 1024 * 1024 });
+    const i = stdout.lastIndexOf(PATH_MARKER);
+    if (i !== -1) {
+      shellDirs = stdout.slice(i + PATH_MARKER.length).split('\n')[0].trim().split(path.delimiter);
+    }
   } catch {
-    return null;
+    // Login shell unavailable or slow — fall back to our own PATH.
   }
+  // Union, shell first: a tool the terminal can see should win, but one only
+  // the server can see should still be found.
+  return [...new Set([...shellDirs, ...own])].filter(Boolean);
+}
+
+// Resolve a binary against `dirs`. Returns absolute path or null. Pure fs, so
+// it costs nothing per agent and cannot be confused by rc-file chatter.
+function resolveBin(bin, dirs) {
+  const exts =
+    process.platform === 'win32'
+      ? (process.env.PATHEXT || '.EXE;.CMD;.BAT').split(';').filter(Boolean)
+      : [''];
+  for (const dir of dirs) {
+    for (const ext of exts) {
+      const p = path.join(expand(dir), bin + ext);
+      try {
+        fs.accessSync(p, fs.constants.X_OK);
+        return p;
+      } catch { /* next candidate */ }
+    }
+  }
+  return null;
 }
 
 // Run `<path> --version` and return a trimmed first line, or null on any error.
-async function probeVersion(binPath) {
+// Runs with the terminal's PATH: most of these CLIs are node/bun/python shebang
+// scripts, so probing with a narrower PATH than the user's would fail to find
+// their own interpreter and report an installed tool as version-less.
+async function probeVersion(binPath, dirs) {
   try {
     const { stdout, stderr } = await execFileP(binPath, ['--version'], {
       timeout: 4000,
       maxBuffer: 1024 * 1024,
+      env: { ...process.env, PATH: dirs.join(path.delimiter) },
     });
     const out = (stdout || stderr || '').split('\n').map((s) => s.trim()).find(Boolean);
     return out || null;
@@ -177,6 +225,36 @@ async function probeVersion(binPath) {
       .map((s) => s.trim())
       .find(Boolean);
     return out || null;
+  }
+}
+
+// A tool can be installed as a macOS desktop app instead of a CLI on PATH —
+// opencode ships both. Standard bundle locations only; returns the .app path.
+const APP_DIRS = ['/Applications', '~/Applications'];
+
+function resolveApp(name) {
+  if (process.platform !== 'darwin' || !name) return null;
+  for (const dir of APP_DIRS) {
+    const p = path.join(expand(dir), `${name}.app`);
+    if (fs.existsSync(p)) return p;
+  }
+  return null;
+}
+
+// Version of an app bundle, read from its Info.plist. Deliberately NOT by
+// running the executable: these are Electron binaries, and `--version` on one
+// opens a window on the user's screen instead of printing anything.
+async function appVersion(appPath) {
+  try {
+    const plist = path.join(appPath, 'Contents', 'Info.plist');
+    const { stdout } = await execFileP('plutil', ['-convert', 'json', '-o', '-', plist], {
+      timeout: 4000,
+      maxBuffer: 4 * 1024 * 1024,
+    });
+    const info = JSON.parse(stdout);
+    return info.CFBundleShortVersionString || info.CFBundleVersion || null;
+  } catch {
+    return null;
   }
 }
 
@@ -196,30 +274,47 @@ async function conversationCounts() {
 }
 
 export async function getAgents() {
-  const counts = await conversationCounts();
+  const [counts, pathDirs] = await Promise.all([conversationCounts(), userPathDirs()]);
 
   return Promise.all(
     REGISTRY.map(async (r) => {
-      const binPath = await resolveBin(r.bin);
-      const installed = Boolean(binPath);
-      const version = installed ? await probeVersion(binPath) : null;
+      // A CLI on PATH wins: it can be driven from a terminal, so it makes the
+      // better run target. Fall back to a desktop app bundle.
+      const binPath = resolveBin(r.bin, pathDirs);
+      const appPath = binPath ? null : resolveApp(r.app);
+      const kind = binPath ? 'cli' : appPath ? 'app' : null;
+      const installed = Boolean(binPath || appPath);
+      const version = binPath
+        ? await probeVersion(binPath, pathDirs)
+        : appPath
+          ? await appVersion(appPath)
+          : null;
 
       const configDirAbs = expand(r.configDir);
-      const configFileAbs = r.configFile ? expand(r.configFile) : null;
+      // Report the config file the user actually has, not just the first
+      // spelling we happen to list.
+      const candidates = r.configFile ? [r.configFile].flat() : [];
+      const configFile = candidates.find((f) => fs.existsSync(expand(f))) || candidates[0] || null;
+      const configFileAbs = configFile ? expand(configFile) : null;
 
       return {
         id: r.id,
         label: r.label,
         bin: r.bin,
         installed,
-        path: binPath,
+        // 'cli' | 'app' | null — the UI offers a terminal for one and a launch
+        // for the other.
+        kind,
+        path: binPath || appPath,
         version,
         configDir: r.configDir,
         configDirExists: configDirAbs ? fs.existsSync(configDirAbs) : false,
-        configFile: r.configFile,
+        configFile,
         configFileExists: configFileAbs ? fs.existsSync(configFileAbs) : false,
-        runCommand: r.run,
-        updateCommand: r.update,
+        runCommand: kind === 'app' ? `open -a ${JSON.stringify(r.app)}` : r.run,
+        // The registry's updater is a CLI subcommand; a desktop build ships its
+        // own updater, so offering the command would only produce an error.
+        updateCommand: kind === 'app' ? null : r.update,
         conversationCount: counts[r.id] ?? 0,
       };
     })
@@ -230,7 +325,7 @@ export async function getAgents() {
 // looked up by id from the registry — never taken from the caller. Best-effort
 // per platform: macOS Terminal via osascript, Windows via `start cmd /k`,
 // Linux via the first common terminal emulator found on PATH.
-export function openAgentTerminal(id) {
+export async function openAgentTerminal(id) {
   const r = BY_ID.get(id);
   if (!r) throw new Error('unknown agent');
   const runCommand = r.run;
@@ -239,6 +334,14 @@ export function openAgentTerminal(id) {
     const child = execFile(cmd, args, (err) => { void err; });
     child.on('error', () => {});
   };
+
+  // Installed as a desktop app and not as a CLI: launch the app. Dropping it
+  // into a Terminal window would tie a GUI process to that shell for nothing.
+  // The app name is a registry literal and `open` takes an args array.
+  if (r.app && !resolveBin(r.bin, await userPathDirs()) && resolveApp(r.app)) {
+    fire('open', ['-a', r.app]);
+    return { ok: true };
+  }
 
   if (process.platform === 'darwin') {
     fire('osascript', [
