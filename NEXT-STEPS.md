@@ -8,6 +8,7 @@ related:
   - plan-asm-markdown-export-2026-06-12.md
   - adr-markdown-export-2026-07-01.md
   - session-summary-2026-07-07-markdown-export-loops-f1-f2.md
+  - kimi-k1-implementation-notes-2026-07-27.md
 ---
 
 # Next Steps
@@ -53,8 +54,9 @@ actual code/data (`file:line` cited; data claims verified against real local
 transcripts). Sizes are implementation + smoke-test + verification, not
 including a codex-plan-review loop (add ~45 min each where noted).
 
-Suggested order: **4 → 1 → 3 → 2 → 5** (cheapest/highest-confidence first;
-item 2 depends on nothing but is the widest blast radius of the four UI items).
+Remaining B-item order after B1/B4 shipped: **3 → 2 → 5/K1**. B3 and B2 both
+touch Claude's list parser, so run them serially (or give them to the same
+implementer). K2 is a later export phase, not the tail of K1.
 
 ---
 
@@ -125,6 +127,18 @@ model degrades to `gpt-5.7-x high`, never to a blank badge); the raw id goes in
 the badge's `title=` tooltip. Sessions with no `effort` record show the model
 alone; sessions with neither show no badge.
 
+*Implementation contract:*
+- Replace model + effort as **one last-real-turn pair**. A final turn with a
+  model but no effort clears an earlier effort; never carry stale effort across
+  a model switch.
+- Claude `model:"<synthetic>"` records do not replace the last real model.
+- Make the shared entry field explicitly nullable, and keep friendly-name
+  formatting pure so known names, unknown passthrough, model-only sessions, and
+  synthetic suppression can be fixture-tested.
+- Cap the badge width and ellipsize it; an unknown raw identifier must not take
+  over the stripe. Recovered Claude cards remain model-less because their
+  metadata-only path deliberately does not parse a main transcript.
+
 *Risk:* moderate-*ish* only in cost — Claude's `readSession()`
 (`server/sources/claude.js:68`) already streams every line, so both fields are
 free to collect there; the mtime cache (`claude.js:105`) means no re-parse cost.
@@ -160,8 +174,11 @@ dangling `|`. Rename wins the left/most-visible position.
 *Constraint:* the export header's title comes from the index `summary`
 (`claude.js:560`), **not** from this path — leave it alone or the golden parity
 diffs break.
-*Tests:* one fixture with `custom-title` after `ai-title`, asserting precedence.
-Also worth confirming Kimi's equivalent (`state.json.isCustomTitle`, B5).
+*Tests:* use the adversarial order
+`ai-title A → custom-title C → ai-title B` and assert `C | B`; this proves a
+newer automatic title cannot erase the rename. Also cover custom-only and
+AI-only. Kimi has one authoritative `state.title`; `isCustomTitle` records its
+provenance but does not provide a second title to compose.
 
 ---
 
@@ -193,40 +210,43 @@ correctly already.
 
 ---
 
-### B5. Add the **Kimi CLI** as a source adapter — **M, ~4–5 h**
+### B5. Add the **Kimi CLI** as a source adapter — **K1, ~1–2 focused days**
 
-*What:* `server/sources/kimi.js` + registry + `SOURCE_META`, per the documented
-three-function adapter contract.
+*What:* first-class Kimi list/detail/subagent/usage support. The implementation
+contract and fixture matrix live in
+[`docs/kimi-k1-implementation-notes-2026-07-27.md`](docs/kimi-k1-implementation-notes-2026-07-27.md);
+this backlog controls scope/status, while that document carries the parser,
+identity, security, caching, and acceptance guidance.
 
 *On-disk format (verified at `~/.kimi-code/`):*
 - `session_index.jsonl` — one line per session: `{sessionId, sessionDir, workDir}`.
-  A ready-made discovery index (cheaper than a tree walk).
+  It is the discovery index; treat it as append-only input and resolve duplicate
+  session ids last-wins.
 - `sessions/wd_<slug>_<hash>/session_<uuid>/state.json` — `createdAt`,
   `updatedAt`, `title`, **`isCustomTitle`**, `workDir`, `lastPrompt`, and an
-  `agents` map (main + subagents, each with its own `homedir`).
-- `…/agents/main/wire.jsonl` — the transcript. Relevant record types:
-  `context.append_message` (`{role, content[], toolCalls[]}` — Anthropic-ish, so
-  `flattenText()` should mostly work), `turn.prompt`, `llm.request`
-  (`model`, `modelAlias`, `thinkingEffort` → feeds B2), `usage.record`
-  (`inputOther`/`output`/`inputCacheRead`/`inputCacheCreation` → could feed the
-  Usage panel as `kind:'consumed'`), `context.append_loop_event`.
+  `agents` map (main + subagents, each with an absolute `homedir`).
+- `…/agents/<agent>/wire.jsonl` — canonical user prompts come from
+  user-origin `turn.prompt` records; assistant text/thinking/tools come from
+  `context.append_loop_event`. `context.append_message` also contains injected
+  user-role context, so `flattenText()` alone is not a transcript parser.
+- `llm.request` carries model + `thinkingEffort`; `usage.record` carries consumed
+  token components. `state.updatedAt` trails live wire activity, so visible
+  recency comes from validated wire timestamps, not state metadata alone.
 - Resume command: `kimi -S <sessionId>` (`--session`), plus `-c` for
   "continue in this cwd".
-- Scale here today: **37 sessions** — small, so no perf pressure.
 
-*Work items:* adapter (`list`/`detail`) + `flattenText` wiring; `SOURCE_META`
-entry (label/short/**color** — needs a pick); registry line
-(`server/sources/index.js:16`); `isInside` containment against `~/.kimi-code`;
-**smoke-test `SIBLING` map entry + the `*-evil` traversal case** (mandatory per
-CLAUDE.md); optional `server/usage.js` entry.
+*Work items:* adapter (`list`/`detail`) + deterministic subagent merge; source
+metadata/registry + Agents-panel entry; model metadata via B2's shared contract;
+Usage-panel aggregation as `kind:'consumed'`; search invalidation across every
+wire; README/package metadata; hermetic fixtures and traversal tests. Validate
+both index-provided `sessionDir` and state-provided agent `homedir` containment —
+checking only the caller's `ref` is insufficient.
 
-*Decided (2026-07-27): full first-class integration, not a minimal adapter.* All
-four sub-scopes are in: (a) list + detail, (b) **subagents folded in** (the
-`agents` map in `state.json` is the resolver input — closer to Codex's shape than
-to Claude's bundle/opaque-ref machinery, so model it on `codex.js`), (c) a
-**Usage-panel entry** from `usage.record` (`kind:'consumed'` — tokens used, not
-quota; Kimi stores no remaining-quota snapshot, so do not label it as one), and
-(d) **Markdown export**.
+*Decided (2026-07-27): K1 is first-class integration, not a minimal adapter.*
+Its three scopes are (a) list + detail, (b) **subagents folded in** with visible
+provenance and deterministic ordering, and (c) a **Usage-panel entry** from
+`usage.record` (`kind:'consumed'` — tokens used, not quota; Kimi stores no
+remaining-quota snapshot, so do not label it as one).
 
 > ⚠️ **Export caveat that changes the method, not the decision:** every existing
 > exporter is validated by byte-diffing against an upstream oracle
@@ -236,30 +256,43 @@ quota; Kimi stores no remaining-quota snapshot, so do not label it as one), and
 > be a **new, self-defined** output pinned by golden snapshots in
 > `scripts/fixtures/` rather than by a parity diff. That's a different (weaker)
 > guarantee than ADR-0012/0018 give Claude and Codex, and it deserves its own ADR
-> entry before code. Consider splitting Kimi into **K1** (list/detail/subagents/
-> usage) and **K2** (export) so K1 isn't gated on that decision.
+> entry before code.
 
-*Risk:* low for K1 — adapters are isolated by design and a throwing adapter is
-caught (`index.js:28`). The security surface is the one thing that must not be
-skipped. K2 carries the design risk above.
-*Revised size:* K1 ~4–5 h, K2 ~4–6 h + ADR.
+**Split confirmed by the user (2026-07-27):** ship Kimi as **K1** —
+list / detail / subagents / usage-panel — and treat **K2 (Markdown export) as an
+explicit phase 2**, gated on the golden-snapshot-vs-parity ADR decision above.
+K1 is not blocked by it.
+
+*Risk:* moderate for K1. Adapter failure isolation is good, but the transcript
+is a multi-file event stream rather than an Anthropic message log; identity,
+injected-context filtering, subagent merging, recency, search invalidation, and
+metadata-supplied path containment all need fixture coverage. K2 carries the
+separate renderer/guarantee risk above.
+*Revised size:* K1 ~1–2 focused days. Estimate K2 only after its ADR fixes the
+output contract, renderer ownership, capabilities, and filename policy.
 
 ---
 
 ## Remaining tracked follow-ups (none export-blocking)
 
 - **`getConversation`/`ADAPTERS` prototype-name 500 hole** (plan §9) — same class
-  of bug as the fixed `EXPORTERS` dispatch one; breaks no 400/500 contract but is
-  explicitly "tracked as a follow-up".
+  of bug as the fixed `EXPORTERS` dispatch one. Reject ordinary unknown names
+  plus `toString` / `constructor` / `__proto__` through an own-property guard,
+  give the error an `unsupported` code, and map it to HTTP 400 in
+  `/api/conversation`; pin both direct-dispatch and endpoint behavior.
 - **Adopt the ADR-0005 clean-prompt split in Codex's `detail()` path**
-  (`startsWith('<environment_context')`) — the ADR says "adopt the same split
-  there eventually"; would also improve list previews.
+  (`startsWith('<environment_context')`) — take user turns only from
+  `event_msg/user_message`, keep assistant turns from
+  `response_item/message(role=assistant)`, and share the export path's
+  `images || local_images` fallback so list/detail/export cannot drift.
 - **Recovered-session previews** (optional): `detail()` for folder-only sessions
   deliberately stays metadata-only (ADR-0017 F2 resolution, reaffirmed in F3) —
   rendering subagent messages in the expanded card would be a new decision.
 - **`npm test` hard-requires the Python extractor** (ADR-0010 tension, documented
-  in the items-CDE summary's watchdog addendum) — unchanged; the F3a golden check
-  also needs `EXTRACT_PY` resolvable.
+  in the items-CDE summary's watchdog addendum). Make checked-in expected
+  Markdown the portable `npm test` gate; move the live Python byte-diff to an
+  explicit maintainer parity command that fails clearly when `EXTRACT_PY` is
+  unavailable. This also establishes the fixture pattern K2 would need.
 - *(Optional scope)* the "save to a qmd collection dir" fast-follow (plan §1) —
   deliberately excluded from the export items since it's the only feature that
   would break ASM's no-write invariant; needs its own decision first.
@@ -274,11 +307,13 @@ skipped. K2 carries the design risk above.
   keep it out of upstream-bound branches; when shipping export upstream,
   cherry-pick onto a branch from wherever `upstream/main` sits (conflicts shrink
   if PR #1 merges first).
-- **Browser-verification caveat:** port 5191 may be `vite preview` serving a
+- **UI-verification caveat:** port 5191 may be `vite preview` serving a
   frozen `dist/` — check
   `ps -o command= -p $(lsof -nP -iTCP:5191 -sTCP:LISTEN -t)` before concluding a
-  UI change doesn't work. Prefer claude-in-chrome over peekaboo for in-page
-  interaction (per global CLAUDE.md).
+  UI change doesn't work. Either approved local tool is valid: use browser
+  tooling when DOM-level inspection is the reliable route, or Peekaboo for
+  native UI/evidence captures. Keep screenshots local and never send them to an
+  external analysis API.
 - **History-parity determinism:** any parity run with history combos on a LIVE
   session should use a snapshot HOME (copy the project dir + `history.jsonl`
   into a temp HOME, set `HOME` for both sides, pass `EXTRACT_PY` explicitly) —
