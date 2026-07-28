@@ -54,9 +54,9 @@ actual code/data (`file:line` cited; data claims verified against real local
 transcripts). Sizes are implementation + smoke-test + verification, not
 including a codex-plan-review loop (add ~45 min each where noted).
 
-Remaining B-item order after B1/B4 shipped: **3 → 2 → 5/K1**. B3 and B2 both
-touch Claude's list parser, so run them serially (or give them to the same
-implementer). K2 is a later export phase, not the tail of K1.
+**Status 2026-07-27: B1, B2, B3, B4 and B5/K1 are all DONE.** Remaining:
+**B6** (project blocklist, added 2026-07-27) and **K2** (Kimi Markdown export,
+still gated on its own golden-snapshot ADR). B6 is independent of both.
 
 ---
 
@@ -372,6 +372,67 @@ output contract, renderer ownership, capabilities, and filename policy.
 </details>
 
 ---
+
+### B6. Exclude chosen projects from the viewer (blocklist) — **M, ~3–4 h** (added 2026-07-27)
+
+*What:* let the user hide specific projects so they neither appear in the project
+dropdown nor in the session list. Motivating case: the agent-memory tool
+**Claude-Mem** writes machine-generated observer sessions to
+`/Users/rymalia/.claude-mem/observer-sessions`, which are not human work and
+swamp everything.
+
+*Why it matters (measured 2026-07-27, not estimated):* that single folder is
+**9,087 of 10,198 entries — 89% of the entire corpus**. Excluding it leaves
+**1,111** real sessions. It is also the #1 entry in the Stats "Top projects"
+panel at 89%, which makes that panel currently useless. Distinct project paths
+today: **105**.
+
+> ⚠️ **The trap that decides the matching rule.** `/Users/rymalia/projects/claude-mem`
+> (38 entries) is the user's *real* project — the tool they actually develop.
+> A substring/name match on `claude-mem` would silently delete real work from the
+> UI. **Match on the full `projectPath` prefix, never on a name substring**, and
+> never on `projectLabel`.
+
+*Where:*
+- The dropdown and the client-side filter both key on **`projectLabel`** (the leaf
+  segment) — `src/App.jsx:556` builds the project aggregate, `:577` filters, `:698`
+  renders the `<option>` list. Labels are *not unique* (`projectLabel()` in
+  `server/sources/_shared.js:105` returns only the last path segment, and it
+  deliberately collapses `cwd`/`workspace` leaves), so the blocklist must be keyed
+  on `projectPath` even though the UI groups by label.
+- Best single choke point: **`listConversations()` in `server/sources/index.js`** —
+  filtering there covers the list endpoint, `server/search.js`, and the
+  `conversationCount` in `server/agents.js` in one place, and the Stats panels
+  inherit it automatically because they derive from the list client-side.
+
+*Open decisions (worth settling before code):*
+1. **Where does config live?** The tool is **zero-config today** — there is no
+   config file of any kind (only the per-CLI `config.toml` paths that
+   `server/agents.js` *reports*). Options: (a) a real config file, which means
+   inventing ASM's first one; (b) `localStorage` alongside `ccv.filters` /
+   `ccv.starred`, which keeps the no-write invariant but makes it client-only and
+   unavailable to the server-side choke point above; (c) an env var, which is
+   awkward to edit. **(a) vs (b) is the real fork** and it follows directly from
+   decision 2.
+2. **Server-side or client-side exclusion?** Server-side is the honest option —
+   excluded sessions never enter the API, so list, search and Stats agree. But it
+   makes the blocklist un-editable from the UI without a write surface, and ASM's
+   **no-write invariant** is load-bearing (see plan §1, where the qmd-save
+   fast-follow was excluded precisely for this reason). Client-side is instantly
+   editable and writes nothing, but `server/usage.js` walks the source trees
+   *directly* (not via `listConversations`), so **Usage totals would still include
+   excluded projects either way** unless it is taught the same list.
+3. **Hide vs collapse.** Excluding by default but offering a "show hidden (9,087)"
+   toggle is friendlier than a hard delete, and makes a mis-typed rule obvious
+   instead of silently losing sessions.
+
+*Risk:* low mechanically, moderate in UX — a wrong rule makes sessions vanish with
+no feedback, which is why the visible-count toggle above matters. No parity surface
+is involved.
+*Tests:* prefix-match precision (`/…/.claude-mem/observer-sessions` excluded while
+`/…/projects/claude-mem` survives — the exact trap above); an excluded project is
+absent from the dropdown *and* the list; `entrySignature`/search does not resurrect
+it; and the empty-blocklist case is a no-op.
 
 ## Remaining tracked follow-ups (none export-blocking)
 
