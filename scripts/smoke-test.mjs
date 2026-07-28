@@ -8,6 +8,7 @@ import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { listConversations, getConversation, collectEvents, exportCapableSources, exportCapabilities, SOURCE_META } from '../server/sources/index.js';
 import { getUsage } from '../server/usage.js';
+import { blocklist, hasBlocklist, isBlockedPath, auditBlocklist } from '../server/config.js';
 import { openPath } from '../server/open.js';
 import { searchContent, entrySignature } from '../server/search.js';
 import { renderMarkdown, truncate, deriveContentDisposition, deriveFlagTokens, deriveExportFilename, resolveExportOptions, summarizeToolUse, pyRepr } from '../server/export.js';
@@ -153,6 +154,177 @@ for (const src of exportCapableSources()) {
       if (leaked) throw new Error(`export read disallowed ref: ${ref}`);
     }
   });
+}
+
+// ---- B6: project blocklist (server/config.js) -------------------------------
+// The feature's failure mode is silent: a wrong rule makes real sessions vanish
+// with no UI feedback. So the matching rule is pinned hard — especially the
+// motivating trap, where `~/.claude-mem/observer-sessions` (machine-generated,
+// hidden) and `~/projects/claude-mem` (real work, kept) must never share a fate.
+// Every case points ASM_CONFIG at its OWN temp file: loadConfig() caches on
+// path+mtime+size, and two same-size writes to one path could collide.
+{
+  const cfgDir = fs.mkdtempSync(path.join(os.tmpdir(), 'asm-blocklist-'));
+  const savedCfg = process.env.ASM_CONFIG;
+  let n = 0;
+  // Point ASM_CONFIG at a fresh file holding `body` (a value to JSON-encode, or
+  // a raw string for the malformed cases); pass null for "no config file".
+  const useConfig = (body) => {
+    const f = path.join(cfgDir, `config-${++n}.json`);
+    if (body !== null) fs.writeFileSync(f, typeof body === 'string' ? body : JSON.stringify(body));
+    process.env.ASM_CONFIG = f;
+    return f;
+  };
+  const ROOT = path.join(cfgDir, 'home');
+  const OBS = path.join(ROOT, '.claude-mem', 'observer-sessions');
+  const REAL = path.join(ROOT, 'projects', 'claude-mem');
+
+  useConfig(null);
+  check('blocklist: absent config → zero-config no-op', () =>
+    blocklist().length === 0 && !hasBlocklist() && !isBlockedPath(OBS));
+
+  useConfig({ blocklist: [] });
+  check('blocklist: empty array → no-op', () => !hasBlocklist() && !isBlockedPath(OBS));
+
+  useConfig({ blocklist: [OBS] });
+  check('blocklist: blocks the directory itself', () => isBlockedPath(OBS));
+  check('blocklist: blocks a descendant', () => isBlockedPath(path.join(OBS, 'a', 'b.jsonl')));
+  // THE trap: a name substring must never match a different project.
+  check('blocklist: real ~/projects/claude-mem survives', () => !isBlockedPath(REAL));
+  // The isInside() prefix trap, in blocklist form.
+  check('blocklist: dashed sibling not swept up', () => !isBlockedPath(OBS + '-2'));
+  check('blocklist: parent directory not blocked', () => !isBlockedPath(path.dirname(OBS)));
+  check('blocklist: empty / non-absolute project path never blocked', () =>
+    !isBlockedPath('') && !isBlockedPath(null) && !isBlockedPath('relative/path'));
+
+  useConfig({ blocklist: [`${OBS}/`, path.join(OBS, 'x', '..'), OBS] });
+  check('blocklist: trailing slash, .. and duplicates normalize to one entry', () =>
+    blocklist().length === 1 && blocklist()[0] === OBS && isBlockedPath(OBS));
+
+  useConfig({ blocklist: ['~/tilde-project', '~'] });
+  check('blocklist: ~ expands to the home directory', () =>
+    isBlockedPath(path.join(os.homedir(), 'tilde-project')) && blocklist().includes(os.homedir()));
+
+  useConfig({ blocklist: ['relative/path', 42, '', '   ', OBS] });
+  check('blocklist: invalid entries dropped, valid ones kept', () =>
+    blocklist().length === 1 && blocklist()[0] === OBS);
+
+  // Fail open, always: a broken config may show too much, never hide real work.
+  useConfig('{ not json');
+  check('blocklist: malformed JSON fails open', () => blocklist().length === 0);
+  useConfig(['/a', '/b']);
+  check('blocklist: top-level array fails open', () => blocklist().length === 0);
+  useConfig({ blocklist: '/a/b' });
+  check('blocklist: non-array blocklist fails open', () => blocklist().length === 0);
+
+  // ---- audit: a rule that matches nothing must not look like one that works --
+  // The failure this catches: naming a CLI's STORAGE directory (where the
+  // transcript file lives) instead of the project you worked in. Both look
+  // equally plausible, and the list is identical either way.
+  {
+    const PROJECT = '/Users/x/projects/ai-session-manager';
+    const paths = [PROJECT, PROJECT, '/Users/x/projects/minutes'];
+    const audit = (entries) => { useConfig({ blocklist: entries }); return auditBlocklist(paths); };
+
+    check('audit: a matching entry reports its session + project counts', () => {
+      const [r] = audit([PROJECT]);
+      return r.sessions === 2 && r.projects === 1 && r.hint === null;
+    });
+    check('audit: a parent directory matches every project beneath it', () => {
+      const [r] = audit(['/Users/x/projects']);
+      return r.sessions === 3 && r.projects === 2;
+    });
+    check('audit: an ordinary non-matching path reports 0 with no bogus hint', () => {
+      const [r] = audit(['/Users/x/projects/does-not-exist']);
+      return r.sessions === 0 && r.hint === null;
+    });
+    // Claude's project dir names the cwd with non-alphanumerics collapsed to '-'.
+    // The suggestion comes from ENCODING the known project paths, never from
+    // decoding the slug (which is ambiguous — see server/usage.js).
+    check('audit: Claude storage path is named, with an exact "did you mean"', () => {
+      const slug = PROJECT.replace(/[^a-zA-Z0-9]/g, '-');
+      const [r] = audit([path.join(os.homedir(), '.claude', 'projects', slug)]);
+      return r.sessions === 0 && /Claude Code's transcript storage/.test(r.hint)
+        && r.hint.includes(`Did you mean "${PROJECT}"`);
+    });
+    check('audit: Codex date folder explains it spans several projects', () => {
+      const [r] = audit([path.join(os.homedir(), '.codex', 'sessions', '2026', '07', '27')]);
+      return /Codex's transcript storage/.test(r.hint) && /by DATE/.test(r.hint)
+        && !/Did you mean/.test(r.hint);
+    });
+    check('audit: other CLI storage roots get the generic hint', () => {
+      const [r] = audit([path.join(os.homedir(), '.grok', 'sessions', 'whatever')]);
+      return /Grok's transcript storage/.test(r.hint) && !/Did you mean/.test(r.hint);
+    });
+    // The storage ROOT itself is not flagged as a mistaken project path: it is
+    // not a project either way, and there is nothing to suggest.
+    check('audit: a storage root itself yields no "did you mean"', () => {
+      const [r] = audit([path.join(os.homedir(), '.claude', 'projects')]);
+      return r.sessions === 0 && r.hint === null;
+    });
+    check('audit: empty blocklist audits nothing', () => {
+      useConfig({ blocklist: [] });
+      return auditBlocklist(paths).length === 0;
+    });
+  }
+
+  // ---- live: the list, and the ref guards behind it ----
+  // Run A is deliberately unfiltered (empty blocklist) so these assertions hold
+  // whether or not the machine running the suite has a real config file.
+  useConfig({ blocklist: [] });
+  const unfiltered = await listConversations();
+  check('blocklist: empty blocklist filters nothing from the live list', () =>
+    unfiltered.length >= all.length && unfiltered.every((c) => !isBlockedPath(c.projectPath)));
+
+  // Block the busiest project in the corpus and prove the list is exactly the
+  // set difference — nothing extra removed, nothing blocked left behind.
+  const byProject = new Map();
+  for (const c of unfiltered) {
+    if (c.projectPath) byProject.set(c.projectPath, (byProject.get(c.projectPath) || 0) + 1);
+  }
+  const [victimPath, victimCount] = [...byProject].sort((a, b) => b[1] - a[1])[0] || [];
+  if (!victimPath) {
+    check('blocklist: live list filtering (no project paths in local data)', true);
+  } else {
+    useConfig({ blocklist: [victimPath] });
+    const filtered = await listConversations();
+    const keys = new Set(filtered.map((c) => c.key));
+    check('blocklist: live list drops exactly the blocked project', () =>
+      filtered.length === unfiltered.length - victimCount
+      && filtered.every((c) => !isBlockedPath(c.projectPath))
+      && unfiltered.every((c) => (c.projectPath === victimPath) !== keys.has(c.key)));
+
+    // A ref bookmarked before the rule was added must not still open or export.
+    const victim = unfiltered.find((c) => c.projectPath === victimPath);
+    const survivor = unfiltered.find((c) => c.projectPath && c.projectPath !== victimPath);
+    await acheck('blocklist: getConversation on a blocked ref → forbidden', async () => {
+      let leaked = false;
+      try { await getConversation(victim.source, victim.ref, 1); leaked = true; } catch (e) {
+        if (e.message !== 'forbidden') throw new Error(`wrong error: ${e.message}`);
+      }
+      if (leaked) throw new Error('opened a blocked session');
+    });
+    if (survivor) {
+      await acheck('blocklist: getConversation on an unblocked ref still works', async () => {
+        const d = await getConversation(survivor.source, survivor.ref, 1);
+        if (!d || !Array.isArray(d.messages)) throw new Error('detail broke for an unblocked session');
+      });
+    }
+    if (exportCapableSources().includes(victim.source) && victim.exportable !== false) {
+      await acheck('blocklist: collectEvents on a blocked ref → forbidden', async () => {
+        let leaked = false;
+        try { await collectEvents(victim.source, victim.ref, {}); leaked = true; } catch (e) {
+          if (e.message !== 'forbidden') throw new Error(`wrong error: ${e.message}`);
+        }
+        if (leaked) throw new Error('exported a blocked session');
+      });
+    }
+  }
+
+  // Restore: every later check runs against the ambient config again.
+  if (savedCfg === undefined) delete process.env.ASM_CONFIG;
+  else process.env.ASM_CONFIG = savedCfg;
+  fs.rmSync(cfgDir, { recursive: true, force: true });
 }
 
 // ---- endpoint hygiene: dispatch, no-store, Content-Disposition (plan §9) -----

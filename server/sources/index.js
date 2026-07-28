@@ -11,6 +11,7 @@ import * as goose from './goose.js';
 import * as droid from './droid.js';
 import * as kimi from './kimi.js';
 import { SOURCE_META } from './_shared.js';
+import { isBlockedPath, hasBlocklist, reportBlocklist } from '../config.js';
 
 export { SOURCE_META };
 
@@ -30,7 +31,16 @@ export function listConversations() {
         catch (e) { console.warn(`[sources] ${name} list failed:`, e.message); return []; }
       })
     );
-    const all = results.flat();
+    // B6: blocked projects are dropped at the single choke point every consumer
+    // shares, so the list endpoint, server/search.js, the client-side Stats
+    // panels and the Agents conversation counts can never disagree about what
+    // exists. Filtering here (not per adapter) is also what keeps the rule
+    // source-agnostic — it matches on the normalized `projectPath`.
+    const raw = results.flat();
+    // A rule that matches nothing looks exactly like one that works, so say so
+    // (once per config version) while the unfiltered set is still in hand.
+    if (hasBlocklist()) reportBlocklist(raw.map((c) => c.projectPath));
+    const all = raw.filter((c) => !isBlockedPath(c.projectPath));
     all.sort((a, b) => {
       const ta = a.lastActivity ? Date.parse(a.lastActivity) : a.mtimeMs;
       const tb = b.lastActivity ? Date.parse(b.lastActivity) : b.mtimeMs;
@@ -44,7 +54,12 @@ export function listConversations() {
 export async function getConversation(sourceName, ref, lastN = 30) {
   const a = ADAPTERS[sourceName];
   if (!a) throw new Error('unknown source');
-  return a.detail(ref, lastN);
+  const d = await a.detail(ref, lastN);
+  // A blocked project is invisible to the whole system, not just to the list: a
+  // ref bookmarked (or starred) before the rule was added must not still open.
+  // 'forbidden' → 403, the same mapping the containment failures already use.
+  if (d && isBlockedPath(d.projectPath)) throw new Error('forbidden');
+  return d;
 }
 
 // ---- markdown export (full-fidelity /replay parity) -------------------------
@@ -71,5 +86,10 @@ export async function collectEvents(sourceName, ref, opts) {
   if (!Object.hasOwn(EXPORTERS, sourceName)) {
     const e = new Error('export not supported for ' + sourceName); e.code = 'unsupported'; throw e;
   }
-  return EXPORTERS[sourceName].collectEvents(ref, opts); // adapter validates ref (isInside) itself
+  const out = await EXPORTERS[sourceName].collectEvents(ref, opts); // adapter validates ref (isInside) itself
+  // Same rule as getConversation: a blocked session is not exportable either.
+  // The check is on the collected `meta.cwd` and never touches the renderer, so
+  // the byte-parity surface is untouched.
+  if (out && out.meta && isBlockedPath(out.meta.cwd)) throw new Error('forbidden');
+  return out;
 }

@@ -133,6 +133,56 @@ pm2 save
 pm2 startup   # follow the printed instructions for your OS
 ```
 
+## Configuration (optional)
+
+The viewer is zero-config by default. The one thing you can configure is a
+**blocklist** of projects to hide — useful when a tool writes machine-generated
+sessions into your home directory and they swamp the real work.
+
+Create `~/.config/ai-session-manager/config.json` (override the location with
+`$ASM_CONFIG`):
+
+```json
+{
+  "blocklist": [
+    "/Users/me/.claude-mem/observer-sessions",
+    "~/scratch"
+  ]
+}
+```
+
+- **Matching is by path prefix, never by name.** An entry hides a project whose
+  path is that directory or anything beneath it. Sibling directories that merely
+  share a textual prefix are not affected — blocking
+  `~/.claude-mem/observer-sessions` leaves both `~/projects/claude-mem` and
+  `~/.claude-mem/observer-sessions-2` fully visible. Entries must be absolute
+  (`~` is expanded); relative entries are ignored.
+- **Hidden means hidden everywhere**: the session list, the project dropdown,
+  content search, the Stats panels, the Agents conversation counts, and the
+  Usage token totals. A blocked session can't be opened or exported by ref
+  either, so an old bookmark or star doesn't reveal one.
+- **The file is only ever read.** ASM never writes it (or anything else) — edit
+  it by hand and press Refresh in the UI; no restart needed.
+- **Mistakes fail open.** A missing, unreadable, or malformed config, or an
+  invalid entry inside a good one, means *less* hiding, never more — a typo can
+  never silently make real sessions disappear.
+- **Rules that hide nothing say so.** An entry matching no sessions logs a line
+  in the server terminal, because a dead rule otherwise looks exactly like a
+  working one. The common mistake is naming where a CLI *stored* the transcript
+  rather than the project you worked in, so those are called out by name:
+
+  ```
+  [config] blocklist entry matched no sessions:
+    "~/.claude/projects/-Users-me-projects-app" — Claude Code's transcript
+    storage, not a project directory. Entries match the directory you worked IN
+    (the session's cwd). Did you mean "/Users/me/projects/app"?
+  ```
+
+Two Usage figures are deliberately *not* filtered, because they aren't
+per-project facts: Codex's remaining-quota snapshot (an account-level number —
+dropping it would report stale quota rather than a smaller one) and Cursor's
+AI-edit tallies (whole-database counters with no session→project link).
+
 ## How it works
 
 - A tiny dev-server API (in `vite.config.js`) delegates to one **source adapter**

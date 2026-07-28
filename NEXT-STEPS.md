@@ -54,9 +54,8 @@ actual code/data (`file:line` cited; data claims verified against real local
 transcripts). Sizes are implementation + smoke-test + verification, not
 including a codex-plan-review loop (add ~45 min each where noted).
 
-**Status 2026-07-27: B1, B2, B3, B4 and B5/K1 are all DONE.** Remaining:
-**B6** (project blocklist, added 2026-07-27) and **K2** (Kimi Markdown export,
-still gated on its own golden-snapshot ADR). B6 is independent of both.
+**Status 2026-07-27: B1, B2, B3, B4, B5/K1 and B6 are all DONE.** Remaining:
+**K2** (Kimi Markdown export, still gated on its own golden-snapshot ADR).
 
 ---
 
@@ -373,7 +372,77 @@ output contract, renderer ownership, capabilities, and filename policy.
 
 ---
 
-### B6. Exclude chosen projects from the viewer (blocklist) — **M, ~3–4 h** (added 2026-07-27)
+### B6. Exclude chosen projects from the viewer (blocklist) — ✅ **DONE 2026-07-27**
+
+Shipped as **`server/config.js`** — ASM's first configuration file, and still
+read-only, so the no-write invariant is untouched:
+`~/.config/ai-session-manager/config.json` (override `$ASM_CONFIG`), holding
+`{ "blocklist": [absolute paths] }`, re-read whenever its mtime changes so an
+edit lands on the next Refresh without a restart.
+
+**The three open decisions, as settled by the user (2026-07-27):**
+1. **Server-side config file**, not `localStorage` — enforcement belongs where
+   every consumer already agrees.
+2. **Hard exclude**, no "show hidden" toggle.
+3. **Completely invisible**, which extended scope to the Usage panel — the one
+   surface that does *not* go through `listConversations()`.
+
+Matching is **prefix-only via `isInside()`** on `projectPath`, never a name
+substring and never `projectLabel`. Live on real data: **10,202 → 1,115**
+entries, the project dropdown drops from 105 to 98 entries, and all **38**
+sessions of the real `~/projects/claude-mem` survive — the trap below held.
+"Top projects" is finally readable (ai-session-manager 11%, minutes 11%,
+standup 8%) instead of 89% observer-sessions.
+
+*Where it landed:*
+- `listConversations()` (`server/sources/index.js`) is the single choke point, so
+  the list endpoint, `server/search.js`, the client-side Stats panels and
+  `conversationCount` in `server/agents.js` cannot disagree. No frontend change
+  was needed at all — every UI surface derives from that list.
+- `getConversation()` and `collectEvents()` re-check and throw `'forbidden'`
+  (→ 403 under the existing mapping), so a ref starred or bookmarked before the
+  rule was added can no longer open *or* export. `collectEvents` checks the
+  collected `meta.cwd` and never touches the renderer — parity surface untouched.
+- **`server/usage.js` had to re-derive project attribution itself**, since it
+  walks the CLI trees directly. Each source uses data the tool actually stored:
+  Claude's recorded `cwd` (probed once per project *directory* — ~100 bounded
+  64 KB head reads instead of ~10k full reads), Codex's `payload.cwd`, grok's
+  session dir, kimi's `workDir`, opencode's `session.directory` (with
+  parent-session inheritance). Claude's directory **slug is deliberately not
+  decoded** — `…-observer-sessions-sub` and `…-observer-sessions-2` encode
+  identically, which is the trap in slug form. Measured: Claude usage went
+  7.36B → 6.06B tokens, 10,264 → 1,177 transcripts, and the panel got *faster*
+  (16.2s → 6.1s) because blocked files are skipped after the probe.
+
+*Two deliberate non-filters, documented in code and README:* Codex's
+remaining-quota snapshot (`rate_limits` is an **account-level** fact — dropping
+the newest snapshot because it landed in a hidden session would report *stale*
+quota, not a smaller one) and Cursor's AI-edit tallies (whole-database counters
+with no session→project link; Cursor *conversations* still hide normally).
+
+*Everything fails open* — absent, unreadable, malformed, or partly-invalid
+config, or a file whose project can't be determined, means less hiding, never
+more. A typo can overcount; it can never silently vaporize real work.
+
+**Follow-up shipped the same day: dead-rule reporting.** First real use hit the
+predictable trap — entries naming a CLI's *storage* directory
+(`~/.claude/projects/<slug>`, `~/.codex/sessions/2026/07/27`) rather than the
+project cwd, which matched nothing and looked identical to a working rule.
+`auditBlocklist()` (pure) + `reportBlocklist()` now log any entry that hid
+nothing, recognize all ten CLI storage roots by name, and — for Claude —
+suggest the real project path by **encoding** the known paths
+(`[^a-zA-Z0-9] → -`) and comparing, never by decoding the ambiguous slug. The
+Codex case is explicitly called out as unfixable (rollouts are filed by date and
+span several projects). Warnings dedupe per config version, so plain refreshes
+stay quiet.
+
+`npm test` **185/0** (158 → +19 blocklist checks + 8 audit checks, incl. the
+`observer-sessions` vs `projects/claude-mem` trap, the `-2` dashed sibling, `~`
+expansion, `..`/trailing-slash normalization, all four fail-open cases, a live
+set-difference proof that exactly the blocked project is removed, and the
+`forbidden` guards on both detail and export). `npm run build` clean.
+
+<details><summary>Original assessment</summary>
 
 *What:* let the user hide specific projects so they neither appear in the project
 dropdown nor in the session list. Motivating case: the agent-memory tool
@@ -433,6 +502,8 @@ is involved.
 `/…/projects/claude-mem` survives — the exact trap above); an excluded project is
 absent from the dropdown *and* the list; `entrySignature`/search does not resurrect
 it; and the empty-blocklist case is a no-op.
+
+</details>
 
 ## Remaining tracked follow-ups (none export-blocking)
 

@@ -14,6 +14,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { parseClaudeUsage } from './contextUsage.js';
 import { isInside } from './sources/_shared.js';
 import { contained, REAL_ROOT as kimiRoot } from './sources/kimi.js';
+import { hasBlocklist, isBlockedPath, blocklistSignature } from './config.js';
 
 const HOME = os.homedir();
 
@@ -77,8 +78,53 @@ function readLines(file) {
   return data.split('\n');
 }
 
+// ---------------------------------------------------------------------------
+// blocked-project filtering (B6)
+// ---------------------------------------------------------------------------
+// This module walks each CLI's files directly instead of going through
+// listConversations(), so it has to re-derive "which project is this file?"
+// itself. Every source below does that from data the tool actually stored — a
+// recorded `cwd` / `workDir` / session `directory` — never from Claude's
+// `-Users-me--foo-bar` directory slug, which is ambiguous by construction: a
+// child directory and a dashed sibling encode identically, and resolving that
+// the wrong way is exactly the claude-mem trap the blocklist exists to avoid.
+//
+// Two invariants hold throughout:
+//   * When no blocklist is configured, none of this runs — the zero-config path
+//     pays nothing.
+//   * When a file's project cannot be determined, it is COUNTED (fail open).
+//     Usage may overcount, but a broken probe can never silently shrink your
+//     totals into looking like you used less than you did.
+//
+// Cursor and Gemini are the two sources this cannot reach: Gemini stores no
+// usage data at all, and Cursor's counters are whole-database AI-edit tallies
+// (`ai_code_hashes` / `scored_commits`) with no session→project link to filter
+// on. Both are labelled 'activity'/unavailable rather than token totals.
+
+// Read the head of a JSONL file and return the first non-empty value `extract`
+// yields. Bounded, so probing a 50 MB transcript costs one 64 KB read.
+function probeJsonl(file, extract, bytes = 65536) {
+  let fd;
+  try { fd = fs.openSync(file, 'r'); } catch { return null; }
+  try {
+    const buf = Buffer.alloc(bytes);
+    const n = fs.readSync(fd, buf, 0, bytes, 0);
+    if (!n) return null;
+    for (const line of buf.subarray(0, n).toString('utf8').split('\n')) {
+      if (!line.trim()) continue;
+      let o; try { o = JSON.parse(line); } catch { continue; } // last line may be cut
+      const v = extract(o);
+      if (v) return v;
+    }
+  } catch { /* unreadable → fail open */ }
+  finally { try { fs.closeSync(fd); } catch {} }
+  return null;
+}
+
 // Per-source memo keyed on a "signature" (usually the newest mtime in the
 // tree). When the signature is unchanged we return the cached payload.
+// Sources that honor the blocklist fold blocklistSignature() into that key, so
+// editing the config file invalidates their cached totals.
 const cache = new Map();
 function memo(key, sig, compute) {
   const hit = cache.get(key);
@@ -97,14 +143,30 @@ function opencodeUsage() {
   try { stat = fs.statSync(dbPath); } catch {
     return { source: 'opencode', available: false, note: 'opencode.db not found' };
   }
-  return memo('opencode', `${stat.mtimeMs}:${stat.size}`, () => {
+  return memo('opencode', `${stat.mtimeMs}:${stat.size}:${blocklistSignature()}`, () => {
     let db;
     try { db = new DatabaseSync(dbPath, { readOnly: true }); } catch {
       return { source: 'opencode', available: false, note: 'Could not open opencode.db' };
     }
+    // Blocked sessions (B6): session.directory is the project path. A child
+    // session records its own directory, but inherits its parent's when it has
+    // none, so the parent's rule still reaches it.
+    const blockedSessions = new Set();
+    if (hasBlocklist()) {
+      try {
+        const rows = db.prepare(`SELECT id, parent_id, directory FROM session`).all();
+        const dirOf = new Map(rows.map((r) => [r.id, r.directory || '']));
+        for (const r of rows) {
+          let dir = r.directory || '';
+          if (!dir && r.parent_id) dir = dirOf.get(r.parent_id) || '';
+          if (isBlockedPath(dir)) blockedSessions.add(r.id);
+        }
+      } catch { /* older schema → nothing to filter on, fail open */ }
+    }
     let cost = 0, input = 0, output = 0, reasoning = 0, cacheRead = 0, cacheWrite = 0, msgs = 0;
     try {
-      for (const row of db.prepare(`SELECT data FROM message WHERE data LIKE '%"tokens"%'`).all()) {
+      for (const row of db.prepare(`SELECT session_id, data FROM message WHERE data LIKE '%"tokens"%'`).all()) {
+        if (blockedSessions.has(row.session_id)) continue;
         let p; try { p = JSON.parse(row.data); } catch { continue; }
         if (typeof p.cost === 'number') cost += p.cost;
         const t = p.tokens;
@@ -140,14 +202,47 @@ function opencodeUsage() {
 // ---------------------------------------------------------------------------
 // claude — JSONL transcripts, sum message.usage across every assistant line
 // ---------------------------------------------------------------------------
+
+// Which ~/.claude/projects/<slug>/ directories belong to a blocked project.
+// Decided per DIRECTORY (not per file) because Claude files a transcript under
+// the directory encoding its cwd, and read from the recorded `cwd` rather than
+// by decoding the slug — decoding is lossy (every '-' becomes '/'), and a slug
+// cannot distinguish `…/observer-sessions/sub` from `…/observer-sessions-2`.
+// A few files are sampled per directory in case the first has no cwd line.
+function claudeBlockedDirs(files) {
+  const samples = new Map(); // dir -> up to 3 candidate transcripts
+  for (const f of files) {
+    const dir = path.dirname(f);
+    const arr = samples.get(dir);
+    if (!arr) samples.set(dir, [f]);
+    else if (arr.length < 3) arr.push(f);
+  }
+  const blocked = new Set();
+  for (const [dir, sample] of samples) {
+    for (const f of sample) {
+      const cwd = probeJsonl(f, (o) => (o && typeof o.cwd === 'string' ? o.cwd : null));
+      if (!cwd) continue; // try the next sample
+      if (isBlockedPath(cwd)) blocked.add(dir);
+      break; // the first transcript that names a cwd decides the directory
+    }
+  }
+  return blocked;
+}
+
 function claudeUsage() {
   const root = path.join(HOME, '.claude', 'projects');
   if (!fs.existsSync(root)) return { source: 'claude', available: false, note: 'No ~/.claude/projects' };
   const { files, newest } = walk(root, (n) => n.endsWith('.jsonl'));
   if (!files.length) return { source: 'claude', available: false, note: 'No transcripts found' };
-  return memo('claude', `${newest}:${files.length}`, () => {
-    let input = 0, output = 0, cacheRead = 0, cacheCreate = 0, assistantMsgs = 0;
+  return memo('claude', `${newest}:${files.length}:${blocklistSignature()}`, () => {
+    // Blocked projects (B6). Claude writes every transcript into the project
+    // directory named after its cwd, so ONE probe decides a whole directory —
+    // ~100 first-line reads instead of ~10k full reads.
+    const blockedDirs = hasBlocklist() ? claudeBlockedDirs(files) : null;
+    let input = 0, output = 0, cacheRead = 0, cacheCreate = 0, assistantMsgs = 0, transcripts = 0;
     for (const f of files) {
+      if (blockedDirs && blockedDirs.has(path.dirname(f))) continue;
+      transcripts++;
       for (const line of readLines(f)) {
         if (!line || line.indexOf('"usage"') < 0) continue;
         let o; try { o = JSON.parse(line); } catch { continue; }
@@ -170,7 +265,7 @@ function claudeUsage() {
       metrics: [
         { key: 'tokens', label: 'Tokens used (all time)', value: total, display: fmtTokens(total),
           detail: `in ${fmtTokens(input)} · out ${fmtTokens(output)} · cache ${fmtTokens(cacheRead + cacheCreate)}` },
-        { key: 'sessions', label: 'Transcripts', value: files.length, display: fmtCount(files.length) },
+        { key: 'sessions', label: 'Transcripts', value: transcripts, display: fmtCount(transcripts) },
         { key: 'messages', label: 'Assistant msgs', value: assistantMsgs, display: fmtCount(assistantMsgs) },
       ],
     };
@@ -188,10 +283,19 @@ function codexUsage() {
   if (!fs.existsSync(root)) return { source: 'codex', available: false, note: 'No ~/.codex/sessions' };
   const { files, newest } = walk(root, (n) => /^rollout-.*\.jsonl$/.test(n));
   if (!files.length) return { source: 'codex', available: false, note: 'No rollout files found' };
-  return memo('codex', `${newest}:${files.length}`, () => {
-    let totalTokens = 0, totalInput = 0, totalOutput = 0, totalReasoning = 0;
+  return memo('codex', `${newest}:${files.length}:${blocklistSignature()}`, () => {
+    // Blocked rollouts (B6): the session_meta record at the head of the file
+    // carries payload.cwd. Rollouts are filed by DATE, not by project, so this
+    // is necessarily one probe per file (a few hundred 64 KB reads).
+    const blockedRollout = hasBlocklist()
+      ? new Set(files.filter((f) => isBlockedPath(
+          probeJsonl(f, (o) => (o && o.payload && typeof o.payload.cwd === 'string' ? o.payload.cwd : null))
+        )))
+      : null;
+    let totalTokens = 0, totalInput = 0, totalOutput = 0, totalReasoning = 0, sessions = 0;
     let latestTs = 0, latestRL = null, planType = null;
     for (const f of files) {
+      const blocked = blockedRollout ? blockedRollout.has(f) : false;
       let fileTotal = null, fileInput = 0, fileOutput = 0, fileReasoning = 0;
       for (const line of readLines(f)) {
         if (!line || line.indexOf('token_count') < 0) continue;
@@ -207,6 +311,10 @@ function codexUsage() {
           fileReasoning = info.reasoning_output_tokens || 0;
         }
         // rate limits: keep the most recent snapshot we see (by line timestamp).
+        // Deliberately NOT blocklist-filtered — used_percent/resets_at describe
+        // the ACCOUNT's remaining quota, not the project's, so dropping the
+        // newest snapshot because it happened to land in a hidden session would
+        // report stale quota rather than a smaller one.
         const rl = p.rate_limits;
         if (rl) {
           const ts = o.timestamp ? Date.parse(o.timestamp) : 0;
@@ -217,18 +325,19 @@ function codexUsage() {
           }
         }
       }
-      if (fileTotal != null) {
+      if (fileTotal != null && !blocked) {
         totalTokens += fileTotal;
         totalInput += fileInput;
         totalOutput += fileOutput;
         totalReasoning += fileReasoning;
       }
+      if (!blocked) sessions++;
     }
 
     const metrics = [
       { key: 'tokens', label: 'Tokens used', value: totalTokens, display: fmtTokens(totalTokens),
         detail: `in ${fmtTokens(totalInput)} · out ${fmtTokens(totalOutput)} · reasoning ${fmtTokens(totalReasoning)}` },
-      { key: 'sessions', label: 'Sessions', value: files.length, display: fmtCount(files.length) },
+      { key: 'sessions', label: 'Sessions', value: sessions, display: fmtCount(sessions) },
     ];
 
     // Genuine remaining-quota: codex stores used_percent + reset windows.
@@ -273,6 +382,14 @@ function codexUsage() {
 // This is real local data, but it is context size, not billed usage — labelled
 // honestly. We also surface session/message counts from summary.json files.
 // ---------------------------------------------------------------------------
+// The project a grok session belongs to, resolved like server/sources/grok.js.
+function grokSessionCwd(sessionDir) {
+  let o = null;
+  try { o = JSON.parse(fs.readFileSync(path.join(sessionDir, 'summary.json'), 'utf8')); } catch {}
+  if (o && typeof o.cwd === 'string' && o.cwd) return o.cwd;
+  try { return decodeURIComponent(path.basename(path.dirname(sessionDir))); } catch { return ''; }
+}
+
 function grokUsage() {
   const root = path.join(HOME, '.grok', 'sessions');
   if (!fs.existsSync(root)) return { source: 'grok', available: false, note: 'No ~/.grok/sessions' };
@@ -282,10 +399,23 @@ function grokUsage() {
     return { source: 'grok', available: false, note: 'No session data found' };
   }
   const newest = Math.max(updates.newest, summaries.newest);
-  return memo('grok', `${newest}:${updates.files.length}:${summaries.files.length}`, () => {
+  return memo('grok', `${newest}:${updates.files.length}:${summaries.files.length}:${blocklistSignature()}`, () => {
+    // Blocked sessions (B6). Both files sit in <enc-cwd>/<sessionId>/, so the
+    // project is decided per session directory, resolved exactly the way the
+    // adapter does it (server/sources/grok.js:105): summary.json's recorded cwd
+    // first, the URL-encoded parent directory name as the fallback.
+    const blockedDir = new Set();
+    if (hasBlocklist()) {
+      for (const f of [...updates.files, ...summaries.files]) {
+        const dir = path.dirname(f);
+        if (blockedDir.has(dir)) continue;
+        if (isBlockedPath(grokSessionCwd(dir))) blockedDir.add(dir);
+      }
+    }
     let peakTokenSum = 0;
     const re = /"totalTokens":(\d+)/g;
     for (const f of updates.files) {
+      if (blockedDir.has(path.dirname(f))) continue;
       let max = 0;
       let data;
       try { data = fs.readFileSync(f, 'utf8'); } catch { continue; }
@@ -296,6 +426,7 @@ function grokUsage() {
     }
     let sessions = 0, chatMsgs = 0;
     for (const f of summaries.files) {
+      if (blockedDir.has(path.dirname(f))) continue;
       let o; try { o = JSON.parse(fs.readFileSync(f, 'utf8')); } catch { continue; }
       sessions++;
       chatMsgs += o.num_chat_messages || o.num_messages || 0;
@@ -325,6 +456,9 @@ function grokUsage() {
 // cursor — no LLM token usage, but the local ai-tracking DB records how many
 // AI-authored file edits / commits it has scored. We surface that as activity,
 // clearly NOT token/quota usage.
+// Not blocklist-filterable (B6): these are whole-database tallies with no
+// session→project link to filter on. Cursor conversations are still hidden from
+// the list normally, because those DO carry a project path.
 // ---------------------------------------------------------------------------
 function cursorUsage() {
   const dbPath = path.join(HOME, '.cursor', 'ai-tracking', 'ai-code-tracking.db');
@@ -384,7 +518,8 @@ function kimiUsage() {
   const indexStat = fs.existsSync(indexPath) ? fs.statSync(indexPath) : null;
   if (!indexStat) return { source: 'kimi', available: false, note: 'No ~/.kimi-code/session_index.jsonl' };
 
-  // sessionId → sessionDir, last record wins, malformed lines skipped.
+  // sessionId → { dir, workDir }, last record wins, malformed lines skipped.
+  // workDir is the project path, carried for the B6 blocklist check below.
   const sessions = new Map();
   for (const line of readLines(indexPath)) {
     const t = line.trim();
@@ -392,13 +527,16 @@ function kimiUsage() {
     let o; try { o = JSON.parse(t); } catch { continue; }
     if (o && typeof o.sessionId === 'string' && o.sessionId
       && typeof o.sessionDir === 'string' && o.sessionDir) {
-      sessions.set(o.sessionId, o.sessionDir);
+      sessions.set(o.sessionId, {
+        dir: o.sessionDir,
+        workDir: typeof o.workDir === 'string' ? o.workDir : '',
+      });
     }
   }
 
   const wires = [];
   let sessionCount = 0;
-  for (const dir of sessions.values()) {
+  for (const { dir, workDir: indexWorkDir } of sessions.values()) {
     // Shares the adapter's symlink-aware containment rather than re-deriving it:
     // a second lexical `path.resolve` + `isInside` copy lived here and had the
     // same symlink hole the adapter did (caught by the adapter harness).
@@ -408,6 +546,9 @@ function kimiUsage() {
     if (!statePath) continue;
     let state;
     try { state = JSON.parse(fs.readFileSync(statePath, 'utf8')); } catch { continue; }
+    // Blocked project (B6) — same workDir precedence as server/sources/kimi.js:328.
+    if (hasBlocklist()
+      && isBlockedPath((typeof state.workDir === 'string' && state.workDir) || indexWorkDir || '')) continue;
     const agents = state && typeof state.agents === 'object' && state.agents ? state.agents : {};
     const before = wires.length;
     for (const key of Object.keys(agents)) {
@@ -429,7 +570,7 @@ function kimiUsage() {
     try { m = fs.statSync(w).mtimeMs; } catch {}
     if (m > newest) newest = m;
   }
-  return memo('kimi', `${newest}:${wires.length}:${indexStat.mtimeMs}`, () => {
+  return memo('kimi', `${newest}:${wires.length}:${indexStat.mtimeMs}:${blocklistSignature()}`, () => {
     let input = 0, output = 0, cacheRead = 0, cacheCreate = 0, records = 0;
     for (const f of wires) {
       for (const line of readLines(f)) {
