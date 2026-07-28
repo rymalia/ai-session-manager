@@ -12,6 +12,8 @@ import os from 'node:os';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { parseClaudeUsage } from './contextUsage.js';
+import { isInside } from './sources/_shared.js';
+import { contained, REAL_ROOT as kimiRoot } from './sources/kimi.js';
 
 const HOME = os.homedir();
 
@@ -369,8 +371,99 @@ function geminiUsage() {
 }
 
 // ---------------------------------------------------------------------------
+// kimi — wire.jsonl event streams resolved through session_index.jsonl with the
+// same containment rules as the conversation adapter (sessionDir inside
+// ~/.kimi-code; every agent homedir inside both the session dir and the root —
+// stored metadata that points outside is never followed). Sums usage.record
+// ONLY: step.end.usage describes the same completed steps and would
+// double-count. The format stores no remaining-quota snapshot → 'consumed'.
+// ---------------------------------------------------------------------------
+function kimiUsage() {
+  const root = path.join(HOME, '.kimi-code');
+  const indexPath = path.join(root, 'session_index.jsonl');
+  const indexStat = fs.existsSync(indexPath) ? fs.statSync(indexPath) : null;
+  if (!indexStat) return { source: 'kimi', available: false, note: 'No ~/.kimi-code/session_index.jsonl' };
+
+  // sessionId → sessionDir, last record wins, malformed lines skipped.
+  const sessions = new Map();
+  for (const line of readLines(indexPath)) {
+    const t = line.trim();
+    if (!t) continue;
+    let o; try { o = JSON.parse(t); } catch { continue; }
+    if (o && typeof o.sessionId === 'string' && o.sessionId
+      && typeof o.sessionDir === 'string' && o.sessionDir) {
+      sessions.set(o.sessionId, o.sessionDir);
+    }
+  }
+
+  const wires = [];
+  let sessionCount = 0;
+  for (const dir of sessions.values()) {
+    // Shares the adapter's symlink-aware containment rather than re-deriving it:
+    // a second lexical `path.resolve` + `isInside` copy lived here and had the
+    // same symlink hole the adapter did (caught by the adapter harness).
+    const sessionDir = contained(dir, kimiRoot);
+    if (!sessionDir) continue;
+    const statePath = contained(path.join(sessionDir, 'state.json'), sessionDir);
+    if (!statePath) continue;
+    let state;
+    try { state = JSON.parse(fs.readFileSync(statePath, 'utf8')); } catch { continue; }
+    const agents = state && typeof state.agents === 'object' && state.agents ? state.agents : {};
+    const before = wires.length;
+    for (const key of Object.keys(agents)) {
+      const a = agents[key];
+      const homedir = a && typeof a.homedir === 'string' ? a.homedir : null;
+      if (!homedir) continue;
+      const resolvedHome = contained(homedir, sessionDir);
+      if (!resolvedHome || !contained(resolvedHome, kimiRoot)) continue;
+      const wire = contained(path.join(resolvedHome, 'wire.jsonl'), resolvedHome);
+      if (wire && fs.existsSync(wire)) wires.push(wire);
+    }
+    if (wires.length > before) sessionCount++;
+  }
+  if (!wires.length) return { source: 'kimi', available: false, note: 'No agent wire files found' };
+
+  let newest = 0;
+  for (const w of wires) {
+    let m = 0;
+    try { m = fs.statSync(w).mtimeMs; } catch {}
+    if (m > newest) newest = m;
+  }
+  return memo('kimi', `${newest}:${wires.length}:${indexStat.mtimeMs}`, () => {
+    let input = 0, output = 0, cacheRead = 0, cacheCreate = 0, records = 0;
+    for (const f of wires) {
+      for (const line of readLines(f)) {
+        if (!line || line.indexOf('usage.record') < 0) continue;
+        let o; try { o = JSON.parse(line); } catch { continue; }
+        if (!o || o.type !== 'usage.record') continue;
+        const u = o.usage;
+        if (!u || typeof u !== 'object') continue;
+        input += u.inputOther ?? u.input ?? 0;
+        output += u.output || 0;
+        cacheRead += u.inputCacheRead ?? u.cacheRead ?? 0;
+        cacheCreate += u.inputCacheCreation ?? u.cacheCreation ?? 0;
+        records++;
+      }
+    }
+    const total = input + output + cacheRead + cacheCreate;
+    return {
+      source: 'kimi',
+      available: true,
+      kind: 'consumed',
+      note: 'No remaining-quota stored locally; totals are all-time across session wires',
+      metrics: [
+        { key: 'tokens', label: 'Tokens used (all time)', value: total, display: fmtTokens(total),
+          detail: `in ${fmtTokens(input)} · out ${fmtTokens(output)} · cache ${fmtTokens(cacheRead + cacheCreate)}` },
+        { key: 'sessions', label: 'Sessions', value: sessionCount, display: fmtCount(sessionCount) },
+        { key: 'records', label: 'Usage records', value: records, display: fmtCount(records) },
+      ],
+    };
+  });
+}
+
+// ---------------------------------------------------------------------------
 const SOURCES = [
-  opencodeUsage, claudeUsage, codexUsage, grokUsage, cursorUsage, geminiUsage,
+  opencodeUsage, claudeUsage, codexUsage, grokUsage, cursorUsage, geminiUsage, kimiUsage,
 ];
 
 export async function getUsage() {

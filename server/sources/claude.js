@@ -60,6 +60,19 @@ function flatten(content) {
   return parts.join('\n').trim();
 }
 
+// Claude Code writes two independent title records into the transcript:
+//   {"type":"ai-title","aiTitle":…}          — auto-generated
+//   {"type":"custom-title","customTitle":…}  — the user's /rename
+// Each is last-wins on its own, then both are composed into one card title so a
+// newer automatic title can never erase a rename. The rename takes the leading
+// (most-visible) position; when only one exists it stands alone — never a
+// dangling separator. NOTE: the export header's title comes from the sessions
+// index `summary` (collectBundleEvents), NOT from here — keep it that way or
+// golden parity breaks.
+function composeTitle(customTitle, aiTitle) {
+  return [customTitle, aiTitle].filter(Boolean).join(' | ') || null;
+}
+
 function classifyUser(content) {
   if (Array.isArray(content) && content.some((b) => b && b.type === 'tool_result')) return 'tool';
   return 'user';
@@ -70,7 +83,11 @@ async function readSession(file, { wantMessages = false, lastN = 30 } = {}) {
     input: fs.createReadStream(file, { encoding: 'utf-8' }),
     crlfDelay: Infinity,
   });
-  let title = null, firstUserText = '', cwd = null, gitBranch = null, firstTs = null, lastTs = null;
+  let aiTitle = null, customTitle = null;
+  let firstUserText = '', cwd = null, gitBranch = null, firstTs = null, lastTs = null;
+  // B2: model + reasoning effort of the LAST REAL assistant turn, tracked as one
+  // pair so a model switch can never leave a stale effort behind.
+  let lastModel = null, lastEffort = null;
   let userCount = 0, assistantCount = 0;
   const messages = wantMessages ? [] : null;
   const ctx = createClaudeContextTracker();
@@ -80,7 +97,8 @@ async function readSession(file, { wantMessages = false, lastN = 30 } = {}) {
     if (!t) continue;
     let o; try { o = JSON.parse(t); } catch { continue; }
     ctx.push(o); // per-session context health — ignores non-eligible records
-    if (o.type === 'ai-title' && o.aiTitle) { title = o.aiTitle; continue; }
+    if (o.type === 'ai-title' && o.aiTitle) { aiTitle = o.aiTitle; continue; }
+    if (o.type === 'custom-title' && o.customTitle) { customTitle = o.customTitle; continue; }
     if (o.cwd) cwd = o.cwd;
     if (o.gitBranch) gitBranch = o.gitBranch;
     if (o.timestamp) { if (!firstTs) firstTs = o.timestamp; lastTs = o.timestamp; }
@@ -92,12 +110,24 @@ async function readSession(file, { wantMessages = false, lastN = 30 } = {}) {
       if (messages) messages.push({ role, text, ts: o.timestamp || null });
     } else if (o.type === 'assistant' && o.message) {
       assistantCount++;
+      // '<synthetic>' is the placeholder Claude Code writes for turns no model
+      // produced (377 locally). It must neither become the badge nor clear the
+      // real pair — only a genuine model turn updates both fields together.
+      // `effort` is a recent addition: most transcripts have none, so an older
+      // session legitimately reports a model with effort null.
+      const mdl = o.message.model;
+      if (mdl && mdl !== '<synthetic>') { lastModel = mdl; lastEffort = o.effort || null; }
       const text = flatten(o.message.content);
       if (messages) messages.push({ role: 'assistant', text, ts: o.timestamp || null, model: o.message.model });
     }
   }
   return {
-    summary: { title, firstUserText, cwd, gitBranch, firstTs, lastTs, userCount, assistantCount, contextUsage: ctx.finalize() },
+    summary: {
+      title: composeTitle(customTitle, aiTitle),
+      firstUserText, cwd, gitBranch, firstTs, lastTs, userCount, assistantCount,
+      model: lastModel, effort: lastEffort,
+      contextUsage: ctx.finalize(),
+    },
     messages: messages ? messages.slice(-lastN) : null,
   };
 }
@@ -149,6 +179,7 @@ export async function list() {
           resume: `${cdPrefix(cwd)}claude --resume ${sessionId}`,
           contextUsage: summary.contextUsage,
           cacheSignature: b.compositeSignature,
+          model: summary.model, effort: summary.effort,
         }));
       } else {
         // Recovered session (folder-only / index-only): metadata-only card —

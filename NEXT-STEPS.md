@@ -102,7 +102,37 @@ self-explanatory.
 
 ---
 
-### B2. Show `model + thinking level` on each session stripe — **M, ~3–4 h**
+### B2. Show `model + thinking level` on each session stripe — ✅ **DONE 2026-07-27**
+
+Shipped across `_shared.js` (`makeEntry` gains nullable raw `model`/`effort`),
+`claude.js` + `codex.js` (per-adapter extraction), `src/modelLabel.js` (new pure
+formatter), `src/App.jsx` (`<ModelBadge>`) and `src/index.css` (`.badge.model`,
+width-capped + ellipsized). Live on real data: **4,519 of 10,195** entries carry a
+model; Codex sessions carry model+effort 100% of the time, Claude sessions are mostly
+model-only exactly as predicted. `<synthetic>` never leaks to a badge.
+
+**Amendment to the ratified decision (2026-07-27).** The B2 decision below placed the
+friendly-name map in `server/sources/_shared.js`. It shipped instead as a pure
+**`src/modelLabel.js`**, so the API keeps reporting raw values (the
+`server/usage.js` honesty rule) and friendly renaming stays presentation-side. This
+also matches the established pure-`src/` module pattern (`exportOptions.js`,
+`sortConvos.js`, `starred.js`) that `scripts/smoke-test.mjs` already imports. A Codex
+plan review judged the new placement "architecturally defensible and preferable" but
+correctly flagged that a ratified decision must not be overridden silently — hence
+this amendment.
+
+Two further changes came out of that review:
+- **Friendly names are a RULE, not a lookup table.** Anthropic ids are structured
+  (`claude-<family>-<major>[-<minor>][-<datestamp>]`), so a table would go stale on
+  every release. Unknown ids pass through raw, so a new model degrades to
+  `gpt-5.7-x`, never to a blank badge.
+- **Codex's qualifying record is `turn_context` alone** — the only record carrying
+  model and effort together. `session_meta` has a model but never an effort, so it is
+  a *fallback only*; letting it write the pair would clear a real effort if a second
+  `session_meta` landed after a turn. No local rollout does that today (0 of 310), but
+  56 carry more than one `session_meta`, so the ordering is reachable on resume.
+
+<details><summary>Original assessment</summary>
 
 *What:* a badge left of `N msgs` reading e.g. `Fable 5 xhigh`, `Opus 4.8 medium`,
 `gpt-5.6-sol high`.
@@ -149,9 +179,26 @@ model/effort assertion + a "no effort field" (older-session) case.
 *Recommend a codex-plan review* — it's the only item that changes the shared
 entry contract.
 
+</details>
+
 ---
 
-### B3. Show the session **rename** value on the stripe — **S, ~1 h**
+### B3. Show the session **rename** value on the stripe — ✅ **DONE 2026-07-27**
+
+Shipped: `readSession()` now tracks `ai-title` and `custom-title` independently
+(each last-wins) and composes them via `composeTitle()` in `server/sources/claude.js`.
+The export header's title path (index `summary`) was deliberately left untouched, so
+golden parity is unaffected.
+
+**Discovery that changes the framing:** of 46 local sessions carrying a
+`custom-title`, **none** also carries an `ai-title` — Claude Code stops emitting
+automatic titles once a session is renamed. So `"<custom> | <ai>"` composition
+essentially never fires on real data; renames simply now appear where before they
+were dropped. The composition is retained as defence (and is fixture-tested with the
+adversarial `ai A → custom C → ai B` ⇒ `C | B` order), not because it is the common
+path.
+
+<details><summary>Original assessment</summary>
 
 *What:* surface a user-renamed session title.
 
@@ -174,6 +221,8 @@ dangling `|`. Rename wins the left/most-visible position.
 *Constraint:* the export header's title comes from the index `summary`
 (`claude.js:560`), **not** from this path — leave it alone or the golden parity
 diffs break.
+
+</details>
 *Tests:* use the adversarial order
 `ai-title A → custom-title C → ai-title B` and assert `C | B`; this proves a
 newer automatic title cannot erase the rename. Also cover custom-only and
@@ -210,7 +259,56 @@ correctly already.
 
 ---
 
-### B5. Add the **Kimi CLI** as a source adapter — **K1, ~1–2 focused days**
+### B5. Add the **Kimi CLI** as a source adapter — ✅ **K1 DONE 2026-07-27**
+
+`server/sources/kimi.js` + `scripts/kimi-adapter-test.mjs` were **implemented by
+Kimi k3 itself** (`kimi-first` lanes — deliberate dogfooding), then reviewed and
+corrected by Claude. Registered in `server/sources/index.js` with a `SOURCE_META`
+entry (`Kimi Code`, cyan `#22d3ee` — the one hue the other nine didn't claim).
+Verified live: **29 Kimi sessions** listed, the Stats source bar renders, and
+`/api/sources` reports `exportable: false` — correct for K1, since the adapter
+deliberately exports no `collectEvents`/`exportCapabilities`.
+
+`npm test` **158/0** with Kimi registered, including the mandatory
+`SIBLING`/`*-evil` traversal case. Kimi's own harness is **19/19**.
+
+Bug found in review and fixed: `detail()` derived sidechain provenance from the
+wire's sort *rank* (`rank !== 0`), but rank 0 is only the main agent when a main
+agent exists — a main-less session would have promoted its first subagent to main
+and dropped the provenance marker. Now keyed off the agent name.
+
+**Usage + Agents** also landed (Kimi lane 2): `kind:'consumed'` with an honest
+"no remaining-quota stored locally" note, aggregating `usage.record` **only**
+(`step.end.usage` would double-count — asserted by fixture), and an Agents-panel
+entry (detected `0.28.1`, `kimi upgrade`, 29 conversations). Kimi's totals were
+cross-checked against an independent Python sum over the same wire set.
+
+**Security fix found by the Codex adversarial review (Critical).** `isInside()` is
+**lexical** — `path.resolve()` does not dereference symlinks, so a symlink planted
+inside `~/.kimi-code` pointing outside it passed containment and the external file
+was genuinely readable (verified experimentally, not assumed). Kimi's paths all come
+from *stored metadata*, which makes this acute. Fixed with realpath-based containment
+covering `sessionDir`, `state.json`, each agent `homedir`, and each `wire.jsonl`.
+`server/usage.js` had a **second, independent copy** of the lexical check with the
+same hole — it now imports the adapter's helper, so there is one implementation.
+Three symlink regression tests were added that fail against the pre-fix code.
+
+> ⚠️ **Repo-wide follow-up:** every other file-based adapter (`claude.js`,
+> `codex.js`, …) uses the same lexical-only `path.resolve` + `isInside` pattern and
+> is therefore open to the same symlink escape. Only Kimi was hardened here, because
+> hardening nine adapters (and deciding whether `realpathSync` per file is acceptable
+> on Claude's ~10k transcripts) is a deliberate change deserving its own pass. The
+> threat requires local write access to the CLI's own state directory, which is why
+> this is a follow-up and not a stop-ship.
+
+Kimi's own judgement calls worth knowing: a grouped assistant step carries its
+`step.begin` timestamp; refs are rejected on *shape* (`/`, `\`, NUL, leading `.`,
+absolute) before any index lookup, with no charset allowlist so future id shapes
+keep working; and `lastActivity` counts any valid wire timestamp (including a
+trailing `usage.record`) while `firstActivity` counts only message-producing
+records — a literal reading of the notes' asymmetric wording.
+
+<details><summary>Original assessment</summary>
 
 *What:* first-class Kimi list/detail/subagent/usage support. The implementation
 contract and fixture matrix live in
@@ -271,9 +369,19 @@ separate renderer/guarantee risk above.
 *Revised size:* K1 ~1–2 focused days. Estimate K2 only after its ADR fixes the
 output contract, renderer ownership, capabilities, and filename policy.
 
+</details>
+
 ---
 
 ## Remaining tracked follow-ups (none export-blocking)
+
+- **Symlink containment across all file-based adapters** (new 2026-07-27) — see the
+  K1 entry above. `isInside()` is lexical; `path.resolve()` does not dereference
+  links, so a symlink inside a CLI's state dir defeats it. Kimi is hardened
+  (`contained()` in `server/sources/kimi.js`); `claude.js`, `codex.js`, `grok.js`,
+  `cursor.js`, `gemini.js`, `copilot.js`, `goose.js`, `droid.js` are not. Decide
+  whether to lift `contained()` into `_shared.js` and adopt it everywhere, and
+  measure the `realpathSync` cost on Claude's ~10k-transcript list path first.
 
 - **`getConversation`/`ADAPTERS` prototype-name 500 hole** (plan §9) — same class
   of bug as the fixed `EXPORTERS` dispatch one. Reject ordinary unknown names

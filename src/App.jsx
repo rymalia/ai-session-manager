@@ -7,6 +7,7 @@ import { SORT_OPTIONS, sortConvos } from './sortConvos.js';
 import ExportMenu from './ExportMenu.jsx';
 import { normalizeExportOpts } from './exportOptions.js';
 import { STARRED_KEY, LEGACY_STARRED_KEY, decodeStarred, encodeStarred } from './starred.js';
+import { modelBadge } from './modelLabel.js';
 import './sort.css';
 
 // Fallback source metadata; replaced by /api/sources on load.
@@ -20,6 +21,7 @@ const DEFAULT_META = {
   copilot: { label: 'GitHub Copilot CLI', short: 'Copilot', color: '#3fb950' },
   goose: { label: 'Goose', short: 'Goose', color: '#e3b341' },
   droid: { label: 'Droid', short: 'Droid', color: '#ff7b72' },
+  kimi: { label: 'Kimi Code', short: 'Kimi', color: '#22d3ee' },
 };
 
 function relativeTime(iso) {
@@ -105,6 +107,18 @@ function fmtCtxTokens(n) {
 // always measured; the percentage carries a ~ only when estimated (Claude), and
 // the pill is coloured by percentLeft. Nothing renders when cu is null. See
 // docs/plan-asm-context-health-2026-07-01.md §3.
+// B2: the model + reasoning effort of the session's last real assistant turn.
+// Nothing renders when the source recorded no model — most older Claude
+// sessions predate the `effort` field, so a model-only badge is normal, and
+// recovered (metadata-only) cards never have either. The friendly name is
+// presentation; the tooltip carries the raw identifier so a prettified label
+// can't hide which model actually ran (src/modelLabel.js).
+function ModelBadge({ model, effort }) {
+  const badge = modelBadge(model, effort);
+  if (!badge) return null;
+  return <span className="badge model" title={badge.title}>{badge.text}</span>;
+}
+
 function ContextBadge({ cu }) {
   if (!cu || !Number.isFinite(cu.usedTokens)) return null;
   const { usedTokens, windowTokens, percentLeft, basis, windowBasis, model, measuredAt, compactions } = cu;
@@ -289,6 +303,7 @@ const ConversationCard = memo(function ConversationCard({
             <span className="badge project">{highlight(convo.projectLabel, query)}</span>
             {convo.gitBranch && <span className="badge branch">⎇ {convo.gitBranch}</span>}
             <ContextBadge cu={convo.contextUsage} />
+            <ModelBadge model={convo.model} effort={convo.effort} />
             <span className="badge">{convo.messageCount} msgs</span>
             {/* relative to lastActivity — i.e. time since the session's END */}
             <span className="badge time" title={sessionRangeTitle(convo.firstActivity, convo.lastActivity)}>

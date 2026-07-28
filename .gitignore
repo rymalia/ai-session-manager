@@ -10,3 +10,8 @@ dist/
 
 # Codex plan-review scratch (not a deliverable)
 .codex-loop/
+
+# Local secrets — never commit
+.env
+.env.*
+!.env.example

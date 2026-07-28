@@ -4,6 +4,55 @@ A small Vite + React app that lists your local AI-coding-CLI conversations
 across **multiple tools**, lets you search/filter them, preview the last 30
 messages, and copy a ready-to-run command to resume any session.
 
+Browse, search, and resume your local AI-coding-CLI sessions — **Claude Code,
+Codex, Grok, opencode, Cursor, Gemini, Copilot, Goose, Droid, Kimi Code** — in
+one place.
+Preview the last 30 messages, see how much context each session has left, and
+export any session to Markdown. **Local-first: it only reads transcripts these
+tools already wrote under your home directory, and nothing ever leaves your
+machine.**
+
+## Screenshots
+
+<p align="center">
+  <img src="docs/images/hero.png" width="90%" alt="Main list: sessions from every installed tool with filter chips, search, sort, and per-session context-health badges">
+</p>
+
+One unified, searchable list across every installed tool — filter by tool and
+project, sort, star, and read each session's context-health badge before you
+decide to resume it.
+
+<table>
+<tr>
+<td width="50%" valign="top">
+  <img src="docs/images/export-popover.png" alt="Export popover with per-flag toggles for tools, results, thinking, sidechains, and history">
+  <br><b>Export to Markdown</b> — send any session to a clean Markdown file, with per-flag control over tools, thinking, subagent sidechains, and <code>history.jsonl</code> backfill.
+</td>
+<td width="50%" valign="top">
+  <img src="docs/images/expanded-transcript.png" alt="Expanded card showing a color-coded transcript with tool calls and results inlined">
+  <br><b>Read without resuming</b> — expand any card for the last 30 messages, color-coded by author with tool calls and results inlined.
+</td>
+</tr>
+<tr>
+<td width="50%" valign="top">
+  <img src="docs/images/stats-panel.png" alt="Stats panel with totals, conversations per tool, top projects, and a 30-day activity chart">
+  <br><b>Stats</b> — totals, per-tool and per-project breakdowns, and a 30-day activity chart, all from local data.
+</td>
+<td width="50%" valign="top">
+  <img src="docs/images/agents-panel.png" alt="Agents panel listing installed CLIs with versions, binary paths, and update commands">
+  <br><b>Agents</b> — which CLIs are installed, their versions and config, with copy-able launch and update commands.
+</td>
+</tr>
+</table>
+
+<p align="center">
+  <img src="docs/images/context-health-badges.png" width="90%" alt="Context-health badges on cards: green when plenty of context remains, amber when the window is getting tight">
+</p>
+
+**Context-health badges** estimate how much of each session's context window is
+still free — green when there's room, amber when it's getting tight — so you can
+tell which sessions are worth resuming without opening them.
+
 ## Supported tools
 
 | Tool | Storage read | Resume command |
@@ -17,11 +66,16 @@ messages, and copy a ready-to-run command to resume any session.
 | **GitHub Copilot CLI**¹ | `~/.copilot/history-session-state/*.json` | `copilot --resume <id>` |
 | **Goose**¹ | `~/.local/share/goose/sessions/*.jsonl` | `goose session resume --name <id>` |
 | **Droid**¹ | `~/.factory/sessions/*.json` | `droid --resume <id>` |
+| **Kimi Code**² | `~/.kimi-code/sessions/**/agents/*/wire.jsonl` (+ `session_index.jsonl` + `state.json`) | `kimi -S <id>` |
 
 ¹ Format-based adapter, written to the tool's documented/expected on-disk
 layout. Each returns nothing until that tool is used (or example data is
 present); open an issue / tweak the adapter if a real install stores things
 differently.
+
+² List, detail, and usage only — Markdown export is **not** supported for Kimi
+(that is a later phase). Subagent wires are merged into the session preview with
+visible provenance.
 
 Only the tools that are actually present on the machine show up; a missing or
 empty data dir is silently skipped.
@@ -94,6 +148,10 @@ pm2 startup   # follow the printed instructions for your OS
   session. Each adapter validates its own `ref` (path must stay within that
   tool's data dir; opencode session ids are pattern-checked).
 - `GET /api/sources` returns display metadata (label + accent colour) per tool.
+- `GET /api/export?source=…&ref=…` renders one session to Markdown. Export-capable
+  adapters (currently Claude and Codex) add a `collectEvents` + `exportCapabilities`
+  surface on top of the base contract; the architecture notes live in
+  [`CLAUDE.md`](CLAUDE.md).
 
 ## Adding another tool
 
@@ -113,6 +171,13 @@ Drop a `server/sources/<tool>.js` that exports `source`, `list()`, and
 - **Expand** any card to read the last 30 messages, color-coded and labelled with
   the originating assistant (Claude / Codex / Grok / opencode / Cursor / …), with
   tool calls and results inlined.
+- **Context-health badge** — each card estimates how much of the model's context
+  window the session has consumed (green → room to spare, amber → nearly full),
+  from what each CLI records locally (`server/contextUsage.js`).
+- **Export to Markdown** — download or copy a Claude/Codex session as Markdown
+  (`GET /api/export`), with per-flag control over tools, tool results, thinking,
+  subagent sidechains, and `history.jsonl` backfill. Output mirrors the CLI's own
+  replay; see the export notes in [`CLAUDE.md`](CLAUDE.md).
 - **Copy resume command** — the exact `cd "<cwd>" && <tool> resume …` for that tool.
 - **Open** — opens the conversation's project folder in the OS file manager
   (`GET /api/open` → `open`/`xdg-open`/`explorer`, path-validated, no shell).
@@ -120,8 +185,8 @@ Drop a `server/sources/<tool>.js` that exports `source`, `list()`, and
   - *Metrics* (`src/Metrics.jsx`) — conversations per tool, top projects, and a
     30-day activity sparkline, all hand-rolled inline SVG (no chart lib).
   - *Usage & quota* (`server/usage.js` → `GET /api/usage`) — per-tool usage read
-    from local data: Codex rate-limit **quota left**, opencode/Claude/Grok token
-    totals, Cursor edit-tracking; Gemini marked N/A (no local data). Read-only.
+    from local data: Codex rate-limit **quota left**, opencode/Claude/Grok/Kimi
+    token totals, Cursor edit-tracking; Gemini marked N/A (no local data). Read-only.
 - **PWA** — installable (`public/manifest.webmanifest`, `public/sw.js`,
   icons; registered via `src/pwa.js`). The service worker is network-first so it
   never serves stale content and doesn't interfere with dev/HMR; `/api/*` is

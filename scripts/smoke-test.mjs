@@ -16,6 +16,7 @@ import { apiMiddleware } from '../vite.config.js';
 import { normalizeExportOpts, buildExportQuery, clampMaxChars, DEFAULT_EXPORT_OPTS } from '../src/exportOptions.js';
 import { encodeClaudeRef, decodeClaudeRef, resolveBundle, loadProjectIndexMap } from '../server/sources/claudeBundle.js';
 import { decodeStarred, encodeStarred } from '../src/starred.js';
+import { modelLabel, modelBadge } from '../src/modelLabel.js';
 
 let pass = 0;
 const fails = [];
@@ -126,6 +127,10 @@ const SIBLING = {
   copilot: `${H}/.copilot/history-session-state-evil/x.json`,
   goose: `${H}/.local/share/goose/sessions-evil/x.jsonl`,
   droid: `${H}/.factory/sessions-evil/x.json`,
+  // Kimi refs are session IDS, never paths — so a path-shaped ref must fail on
+  // shape before any index lookup, and this sibling-prefix case proves the
+  // path-shaped rejection rather than an isInside() check.
+  kimi: `${H}/.kimi-code-evil/sessions/x/state.json`,
 };
 for (const [src, ref] of Object.entries(SIBLING)) {
   await acheck(`security[${src}] rejects sibling-prefix`, async () => {
@@ -1245,6 +1250,195 @@ await acheck('claude list (F2): one card per identity, recovered cards, opaque r
   } finally {
     fs.rmSync(tempHome, { recursive: true, force: true });
   }
+});
+
+// B3: the user's /rename (`custom-title`) must reach the card title, composed
+// with the auto title as "<custom> | <ai>". The adversarial order below is the
+// point of the check: a `custom-title` FOLLOWED by a newer `ai-title` must not
+// lose the rename, which a naive single last-wins `title` variable would do.
+// Real local data has no session carrying both (Claude Code stops emitting
+// ai-title once renamed), so composition is defensive — hence a fixture.
+await acheck('claude list (B3): custom-title composes as "<custom> | <ai>", never a dangling |', async () => {
+  const tempHome = fs.mkdtempSync(path.join(os.tmpdir(), 'asm-claude-b3-'));
+  try {
+    const proj = path.join(tempHome, '.claude', 'projects', '-b3-proj');
+    fs.mkdirSync(proj, { recursive: true });
+    const turn = { type: 'user', timestamp: '2026-01-01T00:00:00.000Z', cwd: '/tmp/b3', message: { content: 'hi' } };
+    const write = (id, records) =>
+      fs.writeFileSync(path.join(proj, `${id}.jsonl`), records.map((r) => JSON.stringify(r)).join('\n') + '\n');
+    const BOTH = 'ba000001-1111-4222-8333-444455556666';
+    const CUST = 'ba000002-1111-4222-8333-444455556666';
+    const AIONLY = 'ba000003-1111-4222-8333-444455556666';
+    // ai-title A → custom-title C → ai-title B  ⇒  "C | B"
+    write(BOTH, [
+      { type: 'ai-title', aiTitle: 'A' }, turn,
+      { type: 'custom-title', customTitle: 'C' },
+      { type: 'ai-title', aiTitle: 'B' },
+    ]);
+    write(CUST, [turn, { type: 'custom-title', customTitle: 'Renamed only' }]);
+    write(AIONLY, [turn, { type: 'ai-title', aiTitle: 'Auto only' }]);
+
+    const entries = JSON.parse(execFileSync(
+      process.execPath,
+      ['--input-type=module', '-e', `
+        const claude = await import(process.argv[1]);
+        process.stdout.write(JSON.stringify(await claude.list()));
+      `, new URL('../server/sources/claude.js', import.meta.url).href],
+      { env: { ...process.env, HOME: tempHome }, encoding: 'utf8' },
+    ));
+    const byId = Object.fromEntries(entries.map((e) => [e.id, e]));
+    const got = (id) => byId[id]?.title;
+    if (got(BOTH) !== 'C | B')
+      throw new Error(`newer ai-title must not erase the rename: expected "C | B", got ${JSON.stringify(got(BOTH))}`);
+    if (got(CUST) !== 'Renamed only')
+      throw new Error(`custom-only must stand alone, got ${JSON.stringify(got(CUST))}`);
+    if (got(AIONLY) !== 'Auto only')
+      throw new Error(`ai-only must stand alone, got ${JSON.stringify(got(AIONLY))}`);
+    for (const id of [CUST, AIONLY]) {
+      if (got(id).includes('|')) throw new Error(`dangling separator in ${JSON.stringify(got(id))}`);
+    }
+  } finally {
+    fs.rmSync(tempHome, { recursive: true, force: true });
+  }
+});
+
+// ---- B2: model + reasoning-effort badge -------------------------------------
+// The formatter is a pure function so every branch is fixture-testable: the
+// structured-id rule, the raw passthrough that keeps a new model from blanking
+// the badge, and the datestamp strip (a greedy version group rendered
+// "Haiku 4.5.20251001" before the strip was pulled out of the match).
+check('modelLabel: structured Claude ids → friendly names', () => (
+  modelLabel('claude-opus-5') === 'Opus 5'
+  && modelLabel('claude-fable-5') === 'Fable 5'
+  && modelLabel('claude-sonnet-4-6') === 'Sonnet 4.6'
+));
+check('modelLabel: trailing release datestamp stripped', () => (
+  modelLabel('claude-haiku-4-5-20251001') === 'Haiku 4.5'
+  && modelLabel('claude-opus-4-5-20251101') === 'Opus 4.5'
+));
+check('modelLabel: unknown ids pass through RAW (never a blank badge)', () => (
+  modelLabel('gpt-5.6-terra') === 'gpt-5.6-terra'
+  && modelLabel('kimi-k3') === 'kimi-k3'
+  && modelLabel('claude-newfamily-9') === 'claude-newfamily-9'
+));
+check('modelLabel: no label for synthetic / empty / non-string', () => (
+  modelLabel('<synthetic>') === null && modelLabel('') === null
+  && modelLabel(null) === null && modelLabel(undefined) === null && modelLabel(42) === null
+));
+check('modelBadge: effort appended, raw id in the tooltip', () => {
+  const b = modelBadge('claude-opus-5', 'high');
+  return b.text === 'Opus 5 high' && b.title === 'claude-opus-5 · effort: high';
+});
+check('modelBadge: model without effort renders model alone', () => {
+  const b = modelBadge('claude-fable-5', null);
+  return b.text === 'Fable 5' && b.title === 'claude-fable-5';
+});
+check('modelBadge: effort with no model yields NO badge (broken pair)', () => (
+  modelBadge(null, 'high') === null && modelBadge('', 'high') === null
+));
+
+// Adapter extraction, through the REAL claude list() in a child process (the
+// HOME-at-import constraint). The pair semantics are the point: model+effort
+// move together, so a model switch can never leave a stale effort attached.
+await acheck('claude list (B2): last-turn model/effort pair, synthetic suppressed', async () => {
+  const tempHome = fs.mkdtempSync(path.join(os.tmpdir(), 'asm-claude-b2-'));
+  try {
+    const proj = path.join(tempHome, '.claude', 'projects', '-b2-proj');
+    fs.mkdirSync(proj, { recursive: true });
+    const asstRec = (model, effort) => ({
+      type: 'assistant', timestamp: '2026-01-01T00:00:00.000Z', cwd: '/tmp/b2',
+      message: { model, content: [{ type: 'text', text: 'ok' }] },
+      ...(effort ? { effort } : {}),
+    });
+    const write = (id, records) =>
+      fs.writeFileSync(path.join(proj, `${id}.jsonl`), records.map((r) => JSON.stringify(r)).join('\n') + '\n');
+    const PAIR = 'b2000001-1111-4222-8333-444455556666';
+    const SWITCH = 'b2000002-1111-4222-8333-444455556666';
+    const NOEFF = 'b2000003-1111-4222-8333-444455556666';
+    const SYNTH = 'b2000004-1111-4222-8333-444455556666';
+    write(PAIR, [asstRec('claude-opus-4-8', 'low'), asstRec('claude-opus-5', 'high')]);
+    // A later model carrying NO effort must CLEAR the earlier 'high'.
+    write(SWITCH, [asstRec('claude-opus-5', 'high'), asstRec('claude-sonnet-4-6', null)]);
+    write(NOEFF, [asstRec('claude-sonnet-4-6', null)]);
+    // '<synthetic>' arrives last but must not become the badge nor clear the pair.
+    write(SYNTH, [asstRec('claude-fable-5', 'max'), asstRec('<synthetic>', null)]);
+
+    const entries = JSON.parse(execFileSync(
+      process.execPath,
+      ['--input-type=module', '-e', `
+        const claude = await import(process.argv[1]);
+        process.stdout.write(JSON.stringify(await claude.list()));
+      `, new URL('../server/sources/claude.js', import.meta.url).href],
+      { env: { ...process.env, HOME: tempHome }, encoding: 'utf8' },
+    ));
+    const byId = Object.fromEntries(entries.map((e) => [e.id, e]));
+    const pair = (id) => `${byId[id]?.model} / ${byId[id]?.effort}`;
+    if (pair(PAIR) !== 'claude-opus-5 / high') throw new Error(`last turn should win, got ${pair(PAIR)}`);
+    if (pair(SWITCH) !== 'claude-sonnet-4-6 / null')
+      throw new Error(`stale effort carried across a model switch: ${pair(SWITCH)}`);
+    if (pair(NOEFF) !== 'claude-sonnet-4-6 / null') throw new Error(`no-effort session wrong: ${pair(NOEFF)}`);
+    if (pair(SYNTH) !== 'claude-fable-5 / max') throw new Error(`<synthetic> disturbed the pair: ${pair(SYNTH)}`);
+  } finally {
+    fs.rmSync(tempHome, { recursive: true, force: true });
+  }
+});
+
+// Codex's pair comes from `turn_context` (the only record carrying model AND
+// effort). `session_meta` is fallback-only — the ordering case below is what a
+// naive "both records write the pair" implementation gets wrong, and the reason
+// the fallback exists (Codex plan review, Major 1). No local rollout currently
+// puts session_meta after a turn_context, but 56 carry more than one, so the
+// ordering is reachable on resume.
+await acheck('codex list (B2): pair from turn_context, session_meta fallback-only', async () => {
+  const tempHome = fs.mkdtempSync(path.join(os.tmpdir(), 'asm-codex-b2-'));
+  try {
+    const dir = path.join(tempHome, '.codex', 'sessions', '2026', '01', '01');
+    fs.mkdirSync(dir, { recursive: true });
+    const rec = (type, payload) => ({ timestamp: '2026-01-01T00:00:00.000Z', type, payload });
+    const meta = (model) => rec('session_meta', { id: 'sid', cwd: '/tmp/b2c', model });
+    const turn = (model, effort) => rec('turn_context', effort ? { model, effort } : { model });
+    const msg = (role, text) => rec('response_item', { type: 'message', role, content: [{ type: 'input_text', text }] });
+    const write = (name, records) => fs.writeFileSync(
+      path.join(dir, `rollout-2026-01-01T00-00-00-${name}.jsonl`),
+      records.map((r) => JSON.stringify(r)).join('\n') + '\n',
+    );
+    const talk = [msg('user', 'hello'), msg('assistant', 'hi')];
+    write('aaaa', [meta('gpt-5.5'), turn('gpt-5.6-sol', 'high'), ...talk]);          // turn wins
+    write('bbbb', [meta('gpt-5.5'), ...talk]);                                        // metadata fallback
+    write('cccc', [meta('gpt-5.5'), turn('gpt-5.6-sol', 'high'), meta('gpt-5.5'), ...talk]); // late meta must NOT clear effort
+    write('dddd', [turn('gpt-5.6-terra', 'xhigh'), turn('gpt-5.6-sol', null), ...talk]);     // switch clears effort
+
+    const entries = JSON.parse(execFileSync(
+      process.execPath,
+      ['--input-type=module', '-e', `
+        const codex = await import(process.argv[1]);
+        process.stdout.write(JSON.stringify(await codex.list()));
+      `, new URL('../server/sources/codex.js', import.meta.url).href],
+      { env: { ...process.env, HOME: tempHome }, encoding: 'utf8' },
+    ));
+    const pair = (n) => {
+      const e = entries.find((x) => x.ref.includes(n));
+      return e ? `${e.model} / ${e.effort}` : 'MISSING';
+    };
+    if (pair('aaaa') !== 'gpt-5.6-sol / high') throw new Error(`turn_context should win, got ${pair('aaaa')}`);
+    if (pair('bbbb') !== 'gpt-5.5 / null') throw new Error(`session_meta fallback wrong, got ${pair('bbbb')}`);
+    if (pair('cccc') !== 'gpt-5.6-sol / high')
+      throw new Error(`a later session_meta cleared a real turn pair, got ${pair('cccc')}`);
+    if (pair('dddd') !== 'gpt-5.6-sol / null')
+      throw new Error(`stale effort carried across a model switch, got ${pair('dddd')}`);
+  } finally {
+    fs.rmSync(tempHome, { recursive: true, force: true });
+  }
+});
+
+// Shape contract: `model`/`effort` are always PRESENT and nullable on every
+// entry from every adapter, so the frontend can read them without guarding.
+check('list contract: model/effort present and nullable on every entry', () => {
+  const bad = all.filter((e) => !('model' in e) || !('effort' in e)
+    || (e.model !== null && typeof e.model !== 'string')
+    || (e.effort !== null && typeof e.effort !== 'string'));
+  if (bad.length) throw new Error(`${bad.length} entries with a bad model/effort shape (e.g. ${bad[0].key})`);
+  return true;
 });
 
 // (7) isMeta user turns are suppressed unless --verbatim.

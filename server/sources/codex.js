@@ -79,6 +79,16 @@ async function readSession(file, { wantMessages = false, lastN = 30 } = {}) {
   // used/window come from the LAST token_count event (last_token_usage is the
   // most recent request's real footprint — the resume-relevant number).
   let ctxModel = null, ctxUsed = null, ctxWindow = null, ctxTs = null;
+  // B2: kept SEPARATE from ctxModel on purpose. ctxModel exists to size the
+  // context-health window and may legitimately want different fallback rules;
+  // this pair is the display badge and must move model+effort together.
+  // The QUALIFYING record for the pair is `turn_context` alone — it is the only
+  // one carrying model and effort together. `session_meta` has a model but never
+  // an effort, so it is a FALLBACK ONLY (used when no turn ever ran): letting it
+  // write the pair would clear a real effort if a second session_meta ever landed
+  // after a turn (56 local rollouts already carry more than one, though none yet
+  // after a turn_context — Codex plan review, Major 1).
+  let lastModel = null, lastEffort = null, metaModel = null;
   const messages = wantMessages ? [] : null;
 
   for await (const line of rl) {
@@ -90,12 +100,17 @@ async function readSession(file, { wantMessages = false, lastN = 30 } = {}) {
     if (o.type === 'session_meta') {
       if (p.id) id = p.id;
       if (p.cwd) cwd = p.cwd;
-      if (p.model) ctxModel = p.model;
+      if (p.model) { ctxModel = p.model; metaModel = p.model; }
       const g = p.git || p.git_info;
       if (g && (g.branch || g.current_branch)) gitBranch = g.branch || g.current_branch;
       continue;
     }
-    if (o.type === 'turn_context') { if (p.model) ctxModel = p.model; continue; }
+    // turn_context carries model AND effort together (`gpt-5.6-sol` / `high`),
+    // so it replaces the whole pair — latest turn wins.
+    if (o.type === 'turn_context') {
+      if (p.model) { ctxModel = p.model; lastModel = p.model; lastEffort = p.effort || null; }
+      continue;
+    }
     if (o.type === 'event_msg' && p.type === 'token_count' && p.info) {
       const last = p.info.last_token_usage;
       if (last && Number.isFinite(last.total_tokens)) {
@@ -141,7 +156,13 @@ async function readSession(file, { wantMessages = false, lastN = 30 } = {}) {
       })
     : null;
   return {
-    summary: { id, cwd, gitBranch, firstTs, lastTs, firstUserText, userCount, assistantCount, contextUsage },
+    summary: {
+      id, cwd, gitBranch, firstTs, lastTs, firstUserText, userCount, assistantCount,
+      // Fallback only when no turn_context ever named a model; a metadata-only
+      // model has no effort to report, so the pair stays half-empty by design.
+      model: lastModel || metaModel, effort: lastModel ? lastEffort : null,
+      contextUsage,
+    },
     messages: messages ? messages.slice(-lastN) : null,
   };
 }
@@ -176,6 +197,7 @@ export async function list() {
       mtimeMs: stat.mtimeMs, firstUserText: summary.firstUserText,
       resume: `${cdPrefix(cwd)}codex resume ${id}`,
       contextUsage: summary.contextUsage,
+      model: summary.model, effort: summary.effort,
     }));
   }
   return out;

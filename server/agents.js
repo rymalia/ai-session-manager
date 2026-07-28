@@ -124,6 +124,16 @@ const REGISTRY = [
     run: 'droid',
     update: null,
   },
+  {
+    id: 'kimi',
+    label: 'Kimi Code',
+    bin: 'kimi',
+    configDir: '~/.kimi-code',
+    configFile: '~/.kimi-code/config.toml',
+    run: 'kimi',
+    // Built-in self-updater (`kimi update` is an alias of `upgrade`).
+    update: 'kimi upgrade',
+  },
 ];
 
 const BY_ID = new Map(REGISTRY.map((r) => [r.id, r]));

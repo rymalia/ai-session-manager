@@ -23,6 +23,9 @@ export const SOURCE_META = {
   copilot: { label: 'GitHub Copilot CLI', short: 'Copilot', color: '#3fb950' },
   goose: { label: 'Goose', short: 'Goose', color: '#e3b341' },
   droid: { label: 'Droid', short: 'Droid', color: '#ff7b72' },
+  // Cyan is the one hue not already claimed by the nine above — the Stats
+  // per-source bars rely on these staying visually distinct.
+  kimi: { label: 'Kimi Code', short: 'Kimi', color: '#22d3ee' },
 };
 
 export function clip(str, n = 300) {
@@ -117,7 +120,7 @@ export function projectLabel(cwd) {
 export function makeEntry({
   source, id, ref, title, cwd, gitBranch,
   userCount = 0, assistantCount = 0, messageCount, firstActivity, lastActivity, mtimeMs, firstUserText = '', resume,
-  contextUsage = null, cacheSignature = null, exportable,
+  contextUsage = null, cacheSignature = null, exportable, model = null, effort = null,
 }) {
   return {
     source,
@@ -148,6 +151,15 @@ export function makeEntry({
     // artifact changes. null for single-file sources; mtimeMs stays the
     // numeric sort key either way.
     cacheSignature: cacheSignature || null,
+    // B2 — the model + reasoning effort of the session's LAST real assistant
+    // turn, RAW exactly as the CLI recorded them ('claude-opus-5', 'high').
+    // Friendly renaming is presentation and lives in src/modelLabel.js, so the
+    // API keeps reporting what the tool actually stored (same honesty rule as
+    // server/usage.js). Adapters must treat these as ONE pair: a later turn
+    // carrying a model but no effort clears an earlier effort — never carry a
+    // stale effort across a model switch. null ⇒ not recorded ⇒ no badge.
+    model: model || null,
+    effort: effort || null,
     // Entry-level export override: only ever `false` (recovered Claude
     // sessions have no exporter until the F3 converter lands). Absent means
     // "defer to the source-level capability".

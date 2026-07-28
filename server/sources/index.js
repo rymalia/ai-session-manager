@@ -9,11 +9,12 @@ import * as gemini from './gemini.js';
 import * as copilot from './copilot.js';
 import * as goose from './goose.js';
 import * as droid from './droid.js';
+import * as kimi from './kimi.js';
 import { SOURCE_META } from './_shared.js';
 
 export { SOURCE_META };
 
-const ADAPTERS = { claude, codex, grok, opencode, cursor, gemini, copilot, goose, droid };
+const ADAPTERS = { claude, codex, grok, opencode, cursor, gemini, copilot, goose, droid, kimi };
 
 // Merge every source into one list, newest first. A failing source is skipped
 // (with a warning) rather than taking the whole response down.
