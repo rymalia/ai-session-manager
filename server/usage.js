@@ -14,6 +14,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { parseClaudeUsage } from './contextUsage.js';
 import { isInside } from './sources/_shared.js';
 import { contained, REAL_ROOT as kimiRoot } from './sources/kimi.js';
+import { resolveCwd as resolveAgyCwd, containedTranscript as agyTranscript, isSessionId as isAgyId } from './sources/antigravity.js';
 import { hasBlocklist, isBlockedPath, blocklistSignature } from './config.js';
 
 const HOME = os.homedir();
@@ -603,8 +604,73 @@ function kimiUsage() {
 }
 
 // ---------------------------------------------------------------------------
+// antigravity
+// ---------------------------------------------------------------------------
+function antigravityUsage() {
+  const brainDir = path.join(HOME, '.gemini', 'antigravity-cli', 'brain');
+  let entries;
+  try { entries = fs.readdirSync(brainDir, { withFileTypes: true }); }
+  catch { return { source: 'antigravity', available: false, note: 'No ~/.gemini/antigravity-cli/brain' }; }
+
+  // Enumerate DIRECT brain/<uuid> children only — identical to the adapter's
+  // list() — so a decoy transcript nested elsewhere (brain/junk/<uuid>/…/) can
+  // neither inflate nor double-count Usage. Each is realpath-guarded via the
+  // shared helper; a symlink dir (isDirectory() false) or bad id is skipped.
+  const found = [];
+  let newest = 0;
+  for (const e of entries) {
+    if (!e.isDirectory() || !isAgyId(e.name)) continue;
+    const real = agyTranscript(e.name);
+    if (!real) continue;
+    let mtimeMs = 0; try { mtimeMs = fs.statSync(real).mtimeMs; } catch {}
+    if (mtimeMs > newest) newest = mtimeMs;
+    found.push({ id: e.name, real, mtimeMs });
+  }
+  if (!found.length) return { source: 'antigravity', available: false, note: 'No transcripts found' };
+
+  return memo('antigravity', `${newest}:${found.length}:${blocklistSignature()}`, () => {
+    let sessions = 0, msgs = 0;
+    for (const { id, real, mtimeMs } of found) {
+      // Blocklist attribution reuses the adapter's ONE resolveCwd (no divergent copy).
+      if (hasBlocklist() && isBlockedPath(resolveAgyCwd(id, mtimeMs) || '')) continue;
+
+      let uCount = 0, aCount = 0;
+      for (const line of readLines(real)) {
+        if (!line) continue;
+        let o; try { o = JSON.parse(line); } catch { continue; }
+        if (!o || typeof o !== 'object') continue;
+        if (o.type === 'USER_INPUT' && o.source === 'USER_EXPLICIT') {
+          uCount++;
+        } else if (o.source === 'MODEL' && (o.type === 'PLANNER_RESPONSE' || (Array.isArray(o.tool_calls) && !o.content))) {
+          // Mirror the adapter: an empty status/streaming step (no thinking,
+          // content, or named tool call) is not a real assistant turn.
+          const hasTool = Array.isArray(o.tool_calls) && o.tool_calls.some((tc) => tc && tc.name);
+          if (o.content || o.thinking || hasTool) aCount++;
+        }
+      }
+
+      if (uCount > 0 || aCount > 0) {
+        sessions++;
+        msgs += uCount + aCount;
+      }
+    }
+
+    return {
+      source: 'antigravity',
+      available: true,
+      kind: 'activity',
+      note: 'Antigravity CLI stores no accessible token/quota data',
+      metrics: [
+        { key: 'sessions', label: 'Conversations', value: sessions, display: fmtCount(sessions) },
+        { key: 'messages', label: 'Total messages', value: msgs, display: fmtCount(msgs) },
+      ],
+    };
+  });
+}
+
+// ---------------------------------------------------------------------------
 const SOURCES = [
-  opencodeUsage, claudeUsage, codexUsage, grokUsage, cursorUsage, geminiUsage, kimiUsage,
+  opencodeUsage, claudeUsage, codexUsage, grokUsage, cursorUsage, geminiUsage, kimiUsage, antigravityUsage,
 ];
 
 export async function getUsage() {

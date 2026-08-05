@@ -143,6 +143,16 @@ const REGISTRY = [
     // Built-in self-updater (`kimi update` is an alias of `upgrade`).
     update: 'kimi upgrade',
   },
+  {
+    id: 'antigravity',
+    label: 'Antigravity CLI',
+    bin: 'agy',
+    configDir: '~/.gemini/antigravity-cli',
+    configFile: null,
+    run: 'agy',
+    // Built-in self-updater (`agy update` — see `agy help`).
+    update: 'agy update',
+  },
 ];
 
 const BY_ID = new Map(REGISTRY.map((r) => [r.id, r]));

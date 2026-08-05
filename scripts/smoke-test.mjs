@@ -132,6 +132,9 @@ const SIBLING = {
   // shape before any index lookup, and this sibling-prefix case proves the
   // path-shaped rejection rather than an isInside() check.
   kimi: `${H}/.kimi-code-evil/sessions/x/state.json`,
+  // Antigravity CLI uses UUID refs, so path-shaped refs must fail on shape before index lookup,
+  // similar to Kimi.
+  antigravity: `${H}/.gemini/antigravity-cli-evil/brain/x/.system_generated/logs/transcript_full.jsonl`,
 };
 for (const [src, ref] of Object.entries(SIBLING)) {
   await acheck(`security[${src}] rejects sibling-prefix`, async () => {

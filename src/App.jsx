@@ -22,6 +22,7 @@ const DEFAULT_META = {
   goose: { label: 'Goose', short: 'Goose', color: '#e3b341' },
   droid: { label: 'Droid', short: 'Droid', color: '#ff7b72' },
   kimi: { label: 'Kimi Code', short: 'Kimi', color: '#22d3ee' },
+  antigravity: { label: 'Antigravity CLI', short: 'Antigravity', color: '#6366f1' },
 };
 
 function relativeTime(iso) {

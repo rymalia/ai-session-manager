@@ -2,7 +2,7 @@
   "name": "ai-session-manager",
   "private": true,
   "version": "1.0.0",
-  "description": "Local viewer for your AI coding CLI conversations — Claude Code, Codex, Grok, opencode, Cursor, Gemini CLI, Copilot CLI, Goose, and Droid in one searchable list. Nothing leaves your machine.",
+  "description": "Local viewer for your AI coding CLI conversations — Claude Code, Codex, Grok, opencode, Cursor, Gemini CLI, Copilot CLI, Goose, Droid, Kimi Code, and Antigravity CLI in one searchable list. Nothing leaves your machine.",
   "license": "MIT",
   "author": "Daniel Farina",
   "repository": {

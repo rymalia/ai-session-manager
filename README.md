@@ -5,8 +5,8 @@ across **multiple tools**, lets you search/filter them, preview the last 30
 messages, and copy a ready-to-run command to resume any session.
 
 Browse, search, and resume your local AI-coding-CLI sessions — **Claude Code,
-Codex, Grok, opencode, Cursor, Gemini, Copilot, Goose, Droid, Kimi Code** — in
-one place.
+Codex, Grok, opencode, Cursor, Gemini, Copilot, Goose, Droid, Kimi Code,
+Antigravity CLI** — in one place.
 Preview the last 30 messages, see how much context each session has left, and
 export any session to Markdown. **Local-first: it only reads transcripts these
 tools already wrote under your home directory, and nothing ever leaves your
@@ -67,6 +67,7 @@ tell which sessions are worth resuming without opening them.
 | **Goose**¹ | `~/.local/share/goose/sessions/*.jsonl` | `goose session resume --name <id>` |
 | **Droid**¹ | `~/.factory/sessions/*.json` | `droid --resume <id>` |
 | **Kimi Code**² | `~/.kimi-code/sessions/**/agents/*/wire.jsonl` (+ `session_index.jsonl` + `state.json`) | `kimi -S <id>` |
+| **Antigravity CLI**² | `~/.gemini/antigravity-cli/brain/<id>/.system_generated/logs/transcript_full.jsonl` | `agy --conversation <id>` |
 
 ¹ Format-based adapter, written to the tool's documented/expected on-disk
 layout. Each returns nothing until that tool is used (or example data is
@@ -74,6 +75,7 @@ present); open an issue / tweak the adapter if a real install stores things
 differently.
 
 ² List, detail, and usage only — Markdown export is **not** supported for Kimi
+Code or Antigravity CLI
 (that is a later phase). Subagent wires are merged into the session preview with
 visible provenance.
 

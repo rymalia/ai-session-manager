@@ -11,6 +11,7 @@ const DEFAULT_META = {
   opencode: { label: 'opencode', short: 'opencode', color: '#f0883e' },
   cursor: { label: 'Cursor', short: 'Cursor', color: '#4d9fff' },
   gemini: { label: 'Gemini CLI', short: 'Gemini', color: '#e6477f' },
+  antigravity: { label: 'Antigravity CLI', short: 'Antigravity', color: '#6366f1' },
 };
 
 const KIND_TAG = {

@@ -26,6 +26,7 @@ export const SOURCE_META = {
   // Cyan is the one hue not already claimed by the nine above — the Stats
   // per-source bars rely on these staying visually distinct.
   kimi: { label: 'Kimi Code', short: 'Kimi', color: '#22d3ee' },
+  antigravity: { label: 'Antigravity CLI', short: 'Antigravity', color: '#6366f1' },
 };
 
 export function clip(str, n = 300) {
